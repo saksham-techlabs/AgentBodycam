@@ -1,0 +1,81 @@
+[build-system]
+requires = ["hatchling>=1.21"]
+build-backend = "hatchling.build"
+
+[project]
+name = "agentbodycam"
+dynamic = ["version"]
+description = "Your AI coding agent now has a bodycam. Local-first recording and forensic replay of coding-agent sessions."
+readme = "README.md"
+license = "MIT"
+license-files = ["LICENSE"]
+requires-python = ">=3.11"
+authors = [{ name = "Saksham Shrivastava" }]
+keywords = ["ai", "coding-agent", "forensics", "replay", "developer-tools", "local-first"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Programming Language :: Python :: 3.14",
+    "Topic :: Software Development :: Debuggers",
+    "Topic :: Software Development :: Quality Assurance",
+    "Typing :: Typed",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.6",
+    "mypy>=1.11",
+]
+
+[project.scripts]
+agentbodycam = "agentbodycam.cli:main"
+
+[tool.hatch.version]
+path = "src/agentbodycam/__init__.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/agentbodycam"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = ["-ra", "--strict-markers", "--strict-config"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py311"
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",   # pycodestyle errors
+    "W",   # pycodestyle warnings
+    "F",   # pyflakes
+    "I",   # isort
+    "B",   # flake8-bugbear
+    "UP",  # pyupgrade
+    "SIM", # flake8-simplify
+    "RUF", # ruff-specific
+    "S",   # flake8-bandit (security)
+    "PTH", # prefer pathlib
+]
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"]
+# subprocess is used deliberately with fixed, non-shell argument lists.
+"src/agentbodycam/utils/git.py" = ["S603"]
+"scripts/check.py" = ["S603"]
+
+[tool.mypy]
+python_version = "3.11"
+strict = true
+warn_unreachable = true
+files = ["src", "tests", "scripts"]
