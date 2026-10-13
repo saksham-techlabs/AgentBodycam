@@ -18,6 +18,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from types import FrameType
 
+from agentbodycam.core.active import ActiveLease, acquire_active_lease
 from agentbodycam.core.git_observer import (
     DEFAULT_GIT_INTERVAL_SECONDS,
     GitObserver,
@@ -155,6 +156,10 @@ class Recorder:
     Lifecycle: :meth:`start` -> :meth:`take_baseline` -> :meth:`scan_once`* -> :meth:`stop`,
     or simply :meth:`run`, which does all of it. Git state is observed on the first scan
     (or an explicit :meth:`observe_git`) and then at most every ``git_interval`` seconds.
+
+    :meth:`start` first takes the project's active-recording lease (one recorder per
+    project) and :meth:`stop` releases it; a second recorder fails with
+    :class:`~agentbodycam.core.active.RecordingInProgressError` before creating a session.
     """
 
     def __init__(
@@ -198,6 +203,7 @@ class Recorder:
         self._git_reported: set[tuple[str, str, int | None]] = set()
         self._stopped = False
         self._stop_requested = False
+        self._lease: ActiveLease | None = None
 
     # -- state -------------------------------------------------------------------------
 
@@ -229,6 +235,17 @@ class Recorder:
     def stop_requested(self) -> bool:
         return self._stop_requested
 
+    @property
+    def lease(self) -> ActiveLease | None:
+        """The active-recording lease, while it is held."""
+        return self._lease
+
+    def release_lease(self) -> None:
+        """Clear ``active.json`` and drop the active lock. Idempotent."""
+        lease, self._lease = self._lease, None
+        if lease is not None:
+            lease.release()
+
     def request_stop(self) -> None:
         """Ask :meth:`run` to finish after its current sleep or scan. Signal-safe."""
         self._stop_requested = True
@@ -247,11 +264,25 @@ class Recorder:
     # -- lifecycle ---------------------------------------------------------------------
 
     def start(self) -> Session:
-        """Create a new session, mark it ``recording`` and append ``session.started``."""
-        if self._session is not None:
+        """Take the active lease, create a ``recording`` session, append ``session.started``.
+
+        ``active.json`` is published only after ``session.started``, so anything that
+        discovers the session sees it already started.
+        """
+        if self._session is not None or self._lease is not None:
             raise RecorderError("recorder has already been started")
-        created = self.store.create_session()
-        self._session = self.store.mark_recording(created.session_id)
+        self._lease = acquire_active_lease(self.store)
+        try:
+            created = self.store.create_session()
+            self._session = self.store.mark_recording(created.session_id)
+            self._emit_started()
+            self._lease.publish(self._session)
+        except BaseException:
+            self.release_lease()
+            raise
+        return self._session
+
+    def _emit_started(self) -> None:
         self._emit(
             EventDraft(
                 type=EventType.SESSION_STARTED,
@@ -275,7 +306,6 @@ class Recorder:
                 },
             )
         )
-        return self._session
 
     def take_baseline(self) -> int:
         """Snapshot the project as it is now. Pre-existing files produce no file events."""
@@ -431,8 +461,17 @@ class Recorder:
         return events
 
     def stop(self, reason: StopReason = StopReason.REQUESTED) -> Session:
-        """Append ``session.stopped``, then mark the session ``stopped`` with ``ended_at``."""
+        """Append ``session.stopped``, mark the session ``stopped``, release the lease.
+
+        The lease is released even if closing the session fails.
+        """
         session_id = self._require_active()
+        try:
+            return self._close_session(session_id, reason)
+        finally:
+            self.release_lease()
+
+    def _close_session(self, session_id: str, reason: StopReason) -> Session:
         stats = self.stats
         self._emit(
             EventDraft(

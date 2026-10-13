@@ -65,6 +65,7 @@ def test_cli_session_commands_work_with_network_disabled(project: Path) -> None:
     sid = out.getvalue().split(": ", 1)[1].splitlines()[0]
     assert main(["session", "list", "--project", str(project)], out=io.StringIO()) == 0
     assert main(["session", "show", sid, "--project", str(project)], out=io.StringIO()) == 0
+    assert main(["session", "active", "--project", str(project)], out=io.StringIO()) == 0
 
 
 @pytest.mark.usefixtures("no_network")

@@ -36,10 +36,11 @@ It is designed to be:
 | Area | Status |
 |---|---|
 | CLI foundation (`--help`, `--version`, `doctor`) | Implemented |
-| Event model + local append-only event store | Implemented |
-| `session create` / `list` / `show` | Implemented |
+| Event model + local append-only event store | Implemented (safe for concurrent processes) |
+| `session create` / `list` / `show` / `active` | Implemented |
 | Universal recorder: file changes (`record`) | Implemented (polling, standard library only) |
 | Universal recorder: Git state (`record`) | Implemented (read-only Git commands) |
+| One active recording per project (OS-backed lease) | Implemented |
 | Universal recorder: command/test/build capture | Not started |
 | Local forensics engine | Not started |
 | Replay UI | Not started |
@@ -136,6 +137,9 @@ What this is, and is not:
   seconds with read-only commands only; AgentBodycam never commits, checks out, resets,
   stashes, fetches or pushes. It stores no diffs, no commit bodies, no author emails and no
   remote URLs, and it never says *who* made a Git change.
+- Only one `record` can run per project. A second one exits with
+  `error: AgentBodycam is already recording this project` and the running session's ID.
+  If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
 - Not yet: command/test/build capture, agent integrations, forensics, replay/UI, export or AI.
 
 ### Session store
@@ -143,9 +147,22 @@ What this is, and is not:
 ```bash
 agentbodycam session list
 agentbodycam session show <session-id>      # metadata, status, start/end time, event count
+agentbodycam session active                 # which session is being recorded right now
 agentbodycam session create                 # create an empty session (developer command)
 agentbodycam session list --project PATH    # operate on another project directory
 ```
+
+```text
+$ agentbodycam session active
+Active AgentBodycam recording
+Session: 20261013T222158Z-347a8ac7fd0fa27c
+Started: 2026-10-13 22:21:58 UTC
+PID: 20884
+```
+
+A recording counts as active only while its recorder process holds an operating-system
+lock on `.agentbodycam/active.lock`; leftover metadata from a crashed recorder is reported
+as stale, never as active.
 
 Sessions live in `.agentbodycam/sessions/<session-id>/` (`session.json` + `events.jsonl`).
 AgentBodycam writes a `.agentbodycam/.gitignore` so recordings are never committed.

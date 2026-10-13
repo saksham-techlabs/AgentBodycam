@@ -4,28 +4,35 @@ Layout, relative to the project root::
 
     .agentbodycam/
       .gitignore              ignores everything so recordings are never committed
+      locks/
+        <session-id>.events.lock   OS lock serialising appends to that session
       sessions/
         <session-id>/
           session.json        session metadata, rewritten atomically
           events.jsonl        one canonical JSON event per line, append-only
 
 Every path the store writes to is checked to be a real (non-symlinked) location inside
-``<project>/.agentbodycam``. A single writer per session is assumed.
+``<project>/.agentbodycam``. Any number of threads and processes may append to the same
+session: each append holds the session's event lock while it revalidates the log tail,
+assigns the next sequence number and writes one line.
 """
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import secrets
 import tempfile
+import threading
 import time
-from collections.abc import Callable
-from dataclasses import dataclass, replace
+from collections.abc import Callable, Iterator
+from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
 from agentbodycam import __version__
+from agentbodycam.core.filelock import DEFAULT_TIMEOUT_SECONDS, FileLock, FileLockError
 from agentbodycam.models.events import (
     CATEGORY_BY_TYPE,
     MAX_EVENT_BYTES,
@@ -46,6 +53,8 @@ from agentbodycam.models.session import (
 
 STORE_DIRNAME = ".agentbodycam"
 SESSIONS_DIRNAME = "sessions"
+LOCKS_DIRNAME = "locks"
+EVENT_LOCK_SUFFIX = ".events.lock"
 SESSION_FILENAME = "session.json"
 EVENTS_FILENAME = "events.jsonl"
 GITIGNORE_FILENAME = ".gitignore"
@@ -88,10 +97,33 @@ class CorruptEventLogError(StoreError):
         self.reason = reason
 
 
-@dataclass(frozen=True, slots=True)
+class StoreLockError(StoreError):
+    """A store lock could not be acquired (timeout or unsafe lock file)."""
+
+
+@dataclass(slots=True)
 class _Tail:
+    """What is known to be valid in ``events.jsonl``: its first ``size`` bytes."""
+
+    identity: tuple[int, int]
     size: int
     last_sequence: int
+    event_ids: set[str] = field(default_factory=set)
+
+
+# OS locks are per handle; this keeps threads of one process from polling each other.
+_THREAD_LOCKS: dict[str, threading.Lock] = {}
+_THREAD_LOCKS_GUARD = threading.Lock()
+
+
+def _thread_lock(path: Path) -> threading.Lock:
+    key = os.path.normcase(path)
+    with _THREAD_LOCKS_GUARD:
+        return _THREAD_LOCKS.setdefault(key, threading.Lock())
+
+
+def _identity(st: os.stat_result) -> tuple[int, int]:
+    return (st.st_dev, st.st_ino)
 
 
 def _utc_now() -> datetime:
@@ -115,13 +147,13 @@ def _reject_constant(name: str) -> None:
     raise ValueError(f"non-standard JSON constant {name}")
 
 
-def _strict_json_loads(text: str) -> object:
+def strict_json_loads(text: str) -> object:
     return json.loads(
         text, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_constant
     )
 
 
-def _atomic_write_text(path: Path, text: str) -> None:
+def atomic_write_text(path: Path, text: str) -> None:
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(tmp_name)
     try:
@@ -137,14 +169,22 @@ def _atomic_write_text(path: Path, text: str) -> None:
 
 def parse_event_log(data: bytes, *, path: Path, session_id: str) -> list[Event]:
     """Parse and validate a complete ``events.jsonl`` payload, preserving file order."""
+    return _parse_lines(data, path=path, session_id=session_id, first_line=1, seen_ids=set())
+
+
+def _parse_lines(
+    data: bytes, *, path: Path, session_id: str, first_line: int, seen_ids: set[str]
+) -> list[Event]:
+    """Validate lines that start at line ``first_line``; ``seen_ids`` is updated in place."""
     if not data:
         return []
     lines = data.split(b"\n")
     if lines[-1] != b"":
-        raise CorruptEventLogError(path, len(lines), "truncated final line (missing newline)")
+        raise CorruptEventLogError(
+            path, first_line + len(lines) - 1, "truncated final line (missing newline)"
+        )
     events: list[Event] = []
-    seen_ids: set[str] = set()
-    for number, raw in enumerate(lines[:-1], start=1):
+    for number, raw in enumerate(lines[:-1], start=first_line):
         if not raw.strip():
             raise CorruptEventLogError(path, number, "blank line")
         try:
@@ -152,7 +192,7 @@ def parse_event_log(data: bytes, *, path: Path, session_id: str) -> list[Event]:
         except UnicodeDecodeError as exc:
             raise CorruptEventLogError(path, number, f"invalid UTF-8: {exc}") from exc
         try:
-            obj = _strict_json_loads(text)
+            obj = strict_json_loads(text)
         except ValueError as exc:
             raise CorruptEventLogError(path, number, f"malformed JSON: {exc}") from exc
         try:
@@ -184,10 +224,13 @@ class EventStore:
         *,
         clock: Callable[[], datetime] = _utc_now,
         monotonic_ns: Callable[[], int] = time.monotonic_ns,
+        lock_timeout: float = DEFAULT_TIMEOUT_SECONDS,
     ) -> None:
         self.project_root = Path(project_root).resolve()
         self.root = self.project_root / STORE_DIRNAME
         self.sessions_dir = self.root / SESSIONS_DIRNAME
+        self.locks_dir = self.root / LOCKS_DIRNAME
+        self.lock_timeout = lock_timeout
         self._clock = clock
         self._monotonic_ns = monotonic_ns
         self._tails: dict[str, _Tail] = {}
@@ -218,6 +261,39 @@ class EventStore:
             path.mkdir()
             self._check_real(path, want_dir=True)
 
+    def existing_store_file(self, path: Path) -> bool:
+        """False if ``path`` is absent; True if it is a real file inside the store.
+
+        Raises :class:`UnsafePathError` for symlinks, junctions, escapes and non-files.
+        """
+        if not path.exists() and not path.is_symlink():
+            return False
+        self._check_real(path, want_dir=False)
+        return True
+
+    def store_root_exists(self) -> bool:
+        """Whether ``.agentbodycam/`` exists (raises if it is unsafe). Creates nothing."""
+        if not self.project_root.is_dir():
+            return False
+        return self._existing_dir(self.root)
+
+    def open_lock(self, path: Path, *, timeout: float | None = None) -> FileLock:
+        """A :class:`FileLock` for ``path``, which must be directly in the store or ``locks/``.
+
+        Creates the containing directory if needed. Does not acquire the lock.
+        """
+        if path.parent not in (self.root, self.locks_dir):
+            raise UnsafePathError(f"lock files must live in the AgentBodycam store: {path}")
+        self.ensure_layout()
+        if path.parent == self.locks_dir:
+            self._ensure_dir(self.locks_dir)
+        self.existing_store_file(path)
+        return FileLock(path, timeout=self.lock_timeout if timeout is None else timeout)
+
+    def event_lock_path(self, session_id: str) -> Path:
+        """Lock file serialising appends to ``session_id``; derived only from a valid ID."""
+        return self.locks_dir / f"{validate_session_id(session_id)}{EVENT_LOCK_SUFFIX}"
+
     def session_dir(self, session_id: str) -> Path:
         """Directory for ``session_id``. Rejects malformed IDs before touching the disk."""
         return self.sessions_dir / validate_session_id(session_id)
@@ -231,7 +307,7 @@ class EventStore:
         if gitignore.exists() or gitignore.is_symlink():
             self._check_real(gitignore, want_dir=False)
         else:
-            _atomic_write_text(gitignore, GITIGNORE_CONTENT)
+            atomic_write_text(gitignore, GITIGNORE_CONTENT)
         self._ensure_dir(self.sessions_dir)
 
     def _require_session_dir(self, session_id: str) -> Path:
@@ -279,13 +355,13 @@ class EventStore:
 
     def _write_session(self, directory: Path, session: Session) -> None:
         text = json.dumps(session.to_dict(), indent=2, sort_keys=True, ensure_ascii=False)
-        _atomic_write_text(directory / SESSION_FILENAME, text + "\n")
+        atomic_write_text(directory / SESSION_FILENAME, text + "\n")
 
     def load_session(self, session_id: str) -> Session:
         directory = self._require_session_dir(session_id)
         path = self._require_file(directory / SESSION_FILENAME, session_id)
         try:
-            session = Session.from_dict(_strict_json_loads(path.read_text(encoding="utf-8")))
+            session = Session.from_dict(strict_json_loads(path.read_text(encoding="utf-8")))
         except (UnicodeDecodeError, ValueError) as exc:
             raise CorruptSessionError(f"{path}: {exc}") from exc
         if session.session_id != session_id:
@@ -344,27 +420,96 @@ class EventStore:
     def read_events(self, session_id: str) -> list[Event]:
         """All events in sequence order. Raises :class:`CorruptEventLogError` on bad data."""
         path = self.events_path(session_id)
-        data = path.read_bytes()
+        with path.open("rb") as fh:
+            identity = _identity(os.fstat(fh.fileno()))
+            data = fh.read()
         events = parse_event_log(data, path=path, session_id=session_id)
-        self._tails[session_id] = _Tail(size=len(data), last_sequence=len(events))
+        self._tails[session_id] = _Tail(
+            identity=identity,
+            size=len(data),
+            last_sequence=len(events),
+            event_ids={event.event_id for event in events},
+        )
         return events
 
     def count_events(self, session_id: str) -> int:
         return len(self.read_events(session_id))
 
+    @contextlib.contextmanager
+    def _event_lock(self, session_id: str) -> Iterator[None]:
+        path = self.event_lock_path(session_id)
+        thread_lock = _thread_lock(path)
+        if not thread_lock.acquire(timeout=self.lock_timeout):
+            raise StoreLockError(
+                f"timed out after {self.lock_timeout:g}s waiting for the event lock of "
+                f"session {session_id}"
+            )
+        try:
+            try:
+                file_lock = self.open_lock(path)
+                file_lock.acquire()
+            except FileLockError as exc:
+                raise StoreLockError(str(exc)) from exc
+            try:
+                yield
+            finally:
+                file_lock.release()
+        finally:
+            thread_lock.release()
+
+    def _sync_tail(self, session_id: str, path: Path) -> _Tail:
+        """Bring the cached tail up to date with the file. Must hold the event lock.
+
+        Bytes another writer appended since the last look are validated incrementally with
+        the same rules as a full read; anything else (first use, a replaced or shrunken
+        file) triggers a full revalidation of the session.
+        """
+        tail = self._tails.get(session_id)
+        with path.open("rb") as fh:
+            st = os.fstat(fh.fileno())
+            if tail is not None and tail.identity == _identity(st):
+                if st.st_size == tail.size:
+                    return tail
+                if st.st_size > tail.size:
+                    fh.seek(tail.size)
+                    data = fh.read(st.st_size - tail.size)
+                    seen = set(tail.event_ids)
+                    events = _parse_lines(
+                        data,
+                        path=path,
+                        session_id=session_id,
+                        first_line=tail.last_sequence + 1,
+                        seen_ids=seen,
+                    )
+                    tail = _Tail(
+                        identity=tail.identity,
+                        size=tail.size + len(data),
+                        last_sequence=tail.last_sequence + len(events),
+                        event_ids=seen,
+                    )
+                    self._tails[session_id] = tail
+                    return tail
+        self._tails.pop(session_id, None)
+        self.load_session(session_id)
+        self.read_events(session_id)
+        return self._tails[session_id]
+
     def append_event(self, session_id: str, draft: EventDraft) -> Event:
-        """Stamp ``draft`` with identity, sequence and time, then append it durably."""
+        """Stamp ``draft`` with identity, sequence and time, then append it durably.
+
+        Safe to call concurrently from any number of threads and processes.
+        """
         if draft.evidence is not EvidenceKind.OBSERVED:
             raise EvidenceRejectedError(
                 f"the event store only accepts observed evidence, got {draft.evidence.value!r}"
             )
-        path = self.events_path(session_id)
-        tail = self._tails.get(session_id)
-        if tail is None or tail.size != path.stat().st_size:
-            self.load_session(session_id)
-            self.read_events(session_id)
-            tail = self._tails[session_id]
+        self.events_path(session_id)
+        with self._event_lock(session_id):
+            return self._append_locked(session_id, draft)
 
+    def _append_locked(self, session_id: str, draft: EventDraft) -> Event:
+        path = self.events_path(session_id)
+        tail = self._sync_tail(session_id, path)
         event = Event(
             event_id=secrets.token_hex(16),
             session_id=session_id,
@@ -388,5 +533,18 @@ class EventStore:
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())
-        self._tails[session_id] = _Tail(size=tail.size + len(line), last_sequence=event.sequence)
+            st = os.fstat(fh.fileno())
+        if _identity(st) != tail.identity or st.st_size != tail.size + len(line):
+            self._tails.pop(session_id, None)
+            raise StoreError(
+                f"{path} changed while event {event.sequence} was appended "
+                "(written to without the event lock?)"
+            )
+        tail.event_ids.add(event.event_id)
+        self._tails[session_id] = _Tail(
+            identity=tail.identity,
+            size=st.st_size,
+            last_sequence=event.sequence,
+            event_ids=tail.event_ids,
+        )
         return event

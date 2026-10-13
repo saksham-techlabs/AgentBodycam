@@ -2,11 +2,13 @@
 
 > Status: **design document**. Most of what is described here is not implemented yet.
 > Implemented today: the CLI foundation (`--help`, `--version`, `doctor`), the typed
-> event/session model and the local append-only event store (section 3.2), managed with
-> `agentbodycam session create|list|show`, and the file-system and read-only Git state parts
-> of the universal recorder (`agentbodycam record`, section 3.1). Command/test/build
-> capture, adapters, forensics, replay, UI, export and AI are not implemented. This document
-> describes the intended direction so future work stays coherent.
+> event/session model and the local append-only, process-safe event store (section 3.2),
+> managed with `agentbodycam session create|list|show|active`, the file-system and
+> read-only Git state parts of the universal recorder (`agentbodycam record`, section 3.1),
+> and the one-recorder-per-project active-recording lease (section 3.1, "Active recording
+> lease"). Command/test/build capture, adapters, forensics, replay, UI, export and AI are
+> not implemented. This document describes the intended direction so future work stays
+> coherent.
 
 ## 1. Goals and principles
 
@@ -104,6 +106,9 @@ read-only Git state snapshots (code: `core/recorder.py`, `core/scanner.py`,
 
 `agentbodycam record [--project DIR] [--interval SECONDS] [--duration SECONDS]`:
 
+0. The project's active-recording lease is acquired (see below). If another live recorder
+   holds it, `record` fails with `error: AgentBodycam is already recording this project`
+   and the other session's ID, and creates nothing.
 1. `EventStore.create_session()` creates a new session (`created`). Each run is a new session.
 2. `EventStore.mark_recording()` sets status `recording` (atomic `session.json` rewrite).
 3. `session.started` is appended (payload: recorder kind, interval, hash limit, the exact
@@ -120,13 +125,81 @@ read-only Git state snapshots (code: `core/recorder.py`, `core/scanner.py`,
    size, per-kind event counts, errors observed, `git_snapshots`, `git_status`), then
    `EventStore.mark_stopped()` sets status `stopped` and `ended_at`.
 
+After `session.started` is appended, `active.json` is published; on stop it is removed after
+`session.stopped` and the `stopped` status are written, and then the lease is released
+(also on errors).
+
 `session.started` also records `git: {enabled, executable_found, interval_seconds}`.
 
 Stop reasons: `requested` (Ctrl+C, SIGTERM or Ctrl+Break, handled as a flag so a scan or
 append is never interrupted half-way), `duration`, `interrupted` (a second Ctrl+C forces
 `KeyboardInterrupt`; no final scan), `error` (unexpected exception; the session is still
 closed when possible, then the error propagates). A crash or kill -9 leaves the session in
-`recording` with no `ended_at`.
+`recording` with no `ended_at`, and may leave `active.json` behind, but the OS releases the
+active lock, so the next `record` starts normally.
+
+#### Active recording lease
+
+Code: `core/active.py`, `core/filelock.py`. One recorder per project.
+
+```text
+.agentbodycam/
+  active.lock     OS lock held exclusively for the recorder's whole lifetime; never deleted
+  active.json     pointer to the session being recorded (atomic write; untrusted)
+```
+
+- **The OS lock is the only authority** for "a recording is alive". It is released by the
+  operating system when the recorder exits, crashes or is killed. `active.json` on its own
+  proves nothing: without a held lock it is *stale*. PIDs are stored for display only and
+  are never used to judge liveness (PIDs are reused).
+- On start, the recorder waits at most 1 s for the lock (a discovery probe can hold it for
+  an instant), then gives up with "already recording". Once it holds the lock, any existing
+  `active.json` is stale by definition; it is reported (`Note: replaced stale ...`) and
+  atomically replaced. No manual cleanup is ever needed.
+- On stop, `active.json` is removed only if its `lease_id` is still ours, then the lock is
+  released, even if closing the session failed.
+
+`active.json` (`schema_version` 1, canonical JSON; unknown or missing fields are rejected):
+
+```json
+{"agentbodycam_version": "0.0.1", "lease_id": "<32 hex>", "pid": 20884,
+ "schema_version": 1, "session_id": "20261013T222158Z-347a8ac7fd0fa27c",
+ "started_at": "2026-10-13T22:21:58.123456Z"}
+```
+
+No hostname, username, environment variables, credentials or absolute paths are stored; the
+project is implied by where the file lives. `started_at` equals the session's `started_at`.
+
+**Discovery** (`get_active_session(project_root)`, CLI `agentbodycam session active`) is
+read-only and creates nothing. It returns:
+
+| State | Meaning |
+|---|---|
+| `active` | the lock is held by a live process, `active.json` is valid, and the named session exists, is `recording` and has the same `started_at` |
+| `inactive` | no live recorder and no metadata |
+| `stale` | metadata present (valid or not) but nobody holds the lock |
+| `invalid` | the lock is held but metadata is missing (recorder starting/stopping), malformed, or names a missing, mismatched or non-`recording` session |
+
+Only `active` may ever be used to attach to a session. The probe briefly takes the lock
+when it is free, then re-checks after reading so a recorder that stops mid-inspection is
+not reported as active.
+
+#### Cross-platform file lock
+
+`core/filelock.py`, standard library only:
+
+- POSIX: `fcntl.flock(LOCK_EX | LOCK_NB)`. Windows: `msvcrt.locking(LK_NBLCK)` on one
+  byte at offset 1 GiB, beyond end-of-file, because Windows byte-range locks are mandatory
+  and locking real bytes would make the (empty) lock file unreadable to other handles.
+- Both are owned by the open handle, so separate `FileLock` objects contend even inside
+  one process, and both are released by the OS when the handle closes or the process dies.
+- Blocking acquisition retries the non-blocking call with exponential backoff (1 ms to
+  50 ms), always bounded by a timeout (`LockTimeoutError`); `try_acquire()` and
+  `is_locked()` never wait. `is_locked()` never creates the file.
+- Lock files are opened without following links (`O_NOFOLLOW` on POSIX), and the opened
+  handle's identity is compared with an `lstat` of the path; symlinks, junctions and other
+  reparse points, and non-regular files are refused. Lock files are never deleted.
+- No fairness between waiters, and no reentrancy.
 
 #### Change detection
 
@@ -314,11 +387,17 @@ Code: `models/events.py`, `models/session.py`, `core/store.py`.
 ```text
 .agentbodycam/
   .gitignore                 "*" - recordings are never committed
+  active.lock / active.json  active-recording lease (section 3.1)
+  locks/
+    <session-id>.events.lock OS lock serialising appends to that session
   sessions/
     <session-id>/
       session.json           session metadata (pretty JSON, sorted keys, atomic rewrite)
       events.jsonl           append-only, one canonical JSON event per line
 ```
+
+`.agentbodycam/` is in the recorder's ignore list and excluded from Git status, so lock and
+metadata files never become file or Git evidence.
 
 **Session** (`session.json`, `schema_version` 1): `session_id`, `project_root` (absolute),
 `started_at` / `ended_at` (UTC), `status` (`created` | `recording` | `stopped`),
@@ -360,8 +439,22 @@ Producers submit an `EventDraft` (type, source, summary, path, payload); the sto
 - Appending to a log that fails validation is refused, so corruption is never extended.
 - Every directory and file used is verified to be a real (non-symlinked, non-junction)
   path inside `<project>/.agentbodycam`; a symlink escaping the store is rejected.
-- Single writer per session is assumed; a second writer is detected by file-size change and
-  the log is re-validated before the next append.
+- **Process-safe appends.** Any number of threads and processes may append to the same
+  session. Each append:
+  1. takes an in-process lock (so threads never poll each other), then the session's OS
+     lock `locks/<session-id>.events.lock` (bounded wait, `StoreLockError` on timeout);
+  2. revalidates the log: bytes appended by other writers since this instance last looked
+     are parsed with the full strict rules (sequence continuity, unique event IDs, session
+     ID, schema); a replaced or shrunken file triggers a full re-read;
+  3. assigns `last_sequence + 1`, writes exactly one line with a single append, `fsync`s;
+  4. checks the file grew by exactly that line (otherwise it raises and forgets its cache,
+     so the next append fully revalidates), updates its cached tail and releases the locks.
+
+  The result is no duplicate or skipped sequence numbers, no lost, overwritten or
+  interleaved lines. Lock file names are derived only from validated session IDs.
+  Producers that bypass `EventStore` are not protected.
+- `monotonic_ns` values from different processes are not comparable; `sequence` is the
+  authoritative order.
 - Events are capped at 256 KiB and must not contain file contents. Large blobs (contents,
   diffs, logs) will be stored content-addressed alongside the log in a later task.
 
@@ -423,9 +516,10 @@ Deterministic, offline analysis over the event store. No AI required. Planned ou
 src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
-  cli.py           argparse CLI (help, version, doctor, session create/list/show, record)
-  core/            application logic (doctor, store, ignore, scanner, git_observer,
-                   recorder; later: forensics)
+  cli.py           argparse CLI (help, version, doctor, session create/list/show/active,
+                   record)
+  core/            application logic (doctor, filelock, store, active, ignore, scanner,
+                   git_observer, recorder; later: forensics)
   models/          typed dataclasses shared across layers (environment, events, session)
   utils/           small dependency-free helpers (today: Git detection and the bounded,
                    shell-free read-only Git command runner)

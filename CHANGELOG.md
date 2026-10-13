@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Process-safe event appends: `EventStore.append_event` serialises writers with a
+  per-session OS lock (`.agentbodycam/locks/<session-id>.events.lock`) plus an in-process
+  thread lock, revalidates bytes appended by other writers before assigning the next
+  sequence, and verifies its own append. Many processes can now append to one session
+  without duplicate, missing or interleaved events.
+- Standard-library-only cross-platform file lock (`msvcrt.locking` on Windows,
+  `fcntl.flock` on POSIX) with bounded timeouts, a non-blocking probe, symlink/junction
+  rejection, and automatic release by the OS when the holder dies.
+- One recorder per project: `agentbodycam record` holds an OS-backed active-recording
+  lease (`.agentbodycam/active.lock`) for its whole lifetime and publishes
+  `.agentbodycam/active.json` (session ID, PID, start time, version, lease ID). A second
+  recorder fails cleanly without creating a session. Metadata left by a crashed recorder
+  is detected as stale and replaced automatically.
+- `agentbodycam session active [--project DIR]` (read-only) and the internal
+  `get_active_session()` discovery API.
 - Read-only Git evidence recording in `agentbodycam record`: a `git.snapshot` event is
   appended after the session starts and whenever the observable Git state changes (branch,
   HEAD commit, detached/unborn HEAD, upstream ahead/behind from local refs, staged /
@@ -40,3 +55,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (Python version, OS, current directory, Git availability).
 - Quality tooling: Ruff (lint + format), mypy (strict), pytest, and `scripts/check.py`.
 - Architecture and product-scope documents.
+
+### Changed
+
+- `EventStore` no longer assumes a single writer per session.

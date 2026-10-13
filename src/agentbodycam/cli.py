@@ -1,8 +1,9 @@
 """Command-line interface for AgentBodycam.
 
-Implemented: environment check, session-store commands and the polling recorder (file
-changes and read-only Git state). Command capture, forensics and replay are not
-implemented yet and are intentionally absent from the CLI.
+Implemented: environment check, session-store commands (including the read-only
+``session active``) and the polling recorder (file changes and read-only Git state; one
+recorder per project). Command capture, forensics and replay are not implemented yet and
+are intentionally absent from the CLI.
 """
 
 from __future__ import annotations
@@ -17,6 +18,12 @@ from pathlib import Path
 from typing import TextIO
 
 from agentbodycam import __version__
+from agentbodycam.core.active import (
+    ActiveSessionInfo,
+    ActiveState,
+    RecordingInProgressError,
+    get_active_session,
+)
 from agentbodycam.core.doctor import collect_environment, format_report
 from agentbodycam.core.recorder import (
     DEFAULT_INTERVAL_SECONDS,
@@ -111,6 +118,16 @@ def build_parser() -> argparse.ArgumentParser:
         "show", parents=[project], help="Show session metadata and event count."
     )
     show.add_argument("session_id", metavar="<session-id>")
+    session_commands.add_parser(
+        "active",
+        parents=[project],
+        help="Show the session being recorded right now, if any (read-only).",
+        description=(
+            "Report the session a live `agentbodycam record` is writing to. A recording is "
+            "active only while its recorder holds the project's OS-level lock; metadata "
+            "left behind by a crashed recorder is reported as stale. Makes no changes."
+        ),
+    )
 
     record = subparsers.add_parser(
         "record",
@@ -212,6 +229,34 @@ def _session_show(store: EventStore, session_id: str, out: TextIO, err: TextIO) 
     return 0
 
 
+def _session_active(project: Path, out: TextIO, err: TextIO) -> int:
+    info: ActiveSessionInfo = get_active_session(project)
+    record = info.record
+    if info.state is ActiveState.ACTIVE and record is not None:
+        out.write(
+            "Active AgentBodycam recording\n"
+            f"Session: {record.session_id}\n"
+            f"Started: {_fmt_time(record.started_at)} UTC\n"
+            f"PID: {record.pid}\n"
+        )
+        return 0
+    if info.state is ActiveState.INVALID:
+        err.write(
+            "error: a recorder holds this project's active lock, but its metadata cannot be "
+            f"trusted: {info.reason}\n"
+        )
+        return 1
+    out.write("No active AgentBodycam recording.\n")
+    if info.state is ActiveState.STALE:
+        which = f" (session {record.session_id})" if record is not None else ""
+        out.write(
+            f"Stale active-recording metadata found{which}: {info.reason}.\n"
+            "The recorder that wrote it is no longer running; the next "
+            "`agentbodycam record` replaces it.\n"
+        )
+    return 0
+
+
 def _run_session(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     project: Path = args.project if args.project is not None else Path.cwd()
     store = EventStore(project)
@@ -220,6 +265,8 @@ def _run_session(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             return _session_create(store, out)
         if args.session_command == "list":
             return _session_list(store, out, err)
+        if args.session_command == "active":
+            return _session_active(project, out, err)
         return _session_show(store, args.session_id, out, err)
     except InvalidSessionIdError as exc:
         err.write(f"error: {exc}\n")
@@ -264,11 +311,27 @@ def _run_record(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     )
     try:
         session = recorder.start()
+    except RecordingInProgressError as exc:
+        owner = exc.record.session_id if exc.record is not None else "unknown (starting up)"
+        err.write(f"error: {exc}\nSession: {owner}\n")
+        return 1
+    except (StoreError, EventValidationError, OSError) as exc:
+        err.write(f"error: {exc}\n")
+        return 1
+    try:
         _write(
             out,
             f"AgentBodycam recording\nSession: {session.session_id}\n"
             f"Project: {_display(str(store.project_root))}\n\n",
         )
+        lease = recorder.lease
+        stale = lease.stale_record if lease is not None else None
+        if stale is not None:
+            _write(
+                out,
+                f"Note: replaced stale active-recording metadata from session "
+                f"{stale.session_id} (its recorder did not stop cleanly).\n\n",
+            )
         with stop_on_signals(recorder):
             baseline = recorder.take_baseline()
             _write(out, f"Baseline snapshot: {baseline} file{'' if baseline == 1 else 's'}\n")
@@ -289,6 +352,8 @@ def _run_record(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
             with contextlib.suppress(StoreError, EventValidationError, OSError):
                 recorder.stop(StopReason.ERROR)
         return 1
+    finally:
+        recorder.release_lease()
     stats = recorder.stats
     lines = [
         "",

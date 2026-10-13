@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import os
+import signal
+import sys
 from pathlib import Path
 
 from agentbodycam.core.store import EventStore
@@ -34,6 +36,14 @@ def store_bytes(project: Path) -> bytes:
     """Every byte AgentBodycam wrote under .agentbodycam/, concatenated."""
     root = project / ".agentbodycam"
     return b"".join(p.read_bytes() for p in sorted(root.rglob("*")) if p.is_file())
+
+
+def hard_kill_pid(pid: int) -> None:
+    """Kill without giving the process any chance to clean up (TerminateProcess / SIGKILL)."""
+    if sys.platform == "win32":
+        os.kill(pid, signal.SIGTERM)
+    else:
+        os.kill(pid, signal.SIGKILL)
 
 
 def try_symlink(link: Path, target: Path, *, directory: bool = False) -> bool:
