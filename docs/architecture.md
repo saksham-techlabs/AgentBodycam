@@ -349,8 +349,11 @@ A check event records an **observed outcome** ("pytest exited 1", "Test check fa
 never a cause ("this edit fixed the tests"). Each invocation is an independent check.
 
 **Classification.** `--check KIND` is authoritative and overrides automatic
-classification (an invalid KIND is a usage error, exit 2, nothing runs). Without it, the
-argv is matched against this whitelist, and nothing else:
+classification (an invalid KIND is a usage error, exit 2, nothing runs), even for an
+informational run such as `pytest --version`. Without it, automatic classification means
+"strong evidence that this invocation executes the check", not merely "this program is a
+test/lint/build/typecheck tool": the argv is matched against this whitelist of commands
+that appear to actually execute a check, and nothing else:
 
 | Kind | Recognised (program base name, case-insensitive, `.exe`/`.cmd`/`.bat`/`.com` ignored) | Name |
 |---|---|---|
@@ -370,6 +373,34 @@ version flag such as `-3.12`), followed only by value-less flags from `-B -E -I 
 -s -S -u`, then `-m MODULE`. Anything else (`python script.py`, `python -W error -m
 pytest`, `npm run custom`, `npm --prefix x test`, `make`, `bash build.sh`, `cargo clippy`,
 `ruff format`) is **not classified** and stays a plain command.
+
+**Informational / no-run invocations are not checks.** A whitelisted command is still
+left unclassified when one of its own arguments (anywhere, including after `--`) makes it
+print help, a version, a listing or its configuration, or do a dry run, instead of
+executing the check:
+
+| Tool | Excluded arguments |
+|---|---|
+| `pytest` | `-h`, `--help`, `-V`, `--version`, `--collect-only`, `--co`, `--fixtures`, `--fixtures-per-test`, `--markers`, `--setup-plan`, `--setup-only` |
+| `unittest` | `-h`, `--help` |
+| `build` | `-h`, `--help`, `-V`, `--version` |
+| `mypy` | `-h`, `--help`, `-V`, `--version` |
+| `pyright` | `-h`, `--help`, `--version` |
+| `ruff check` | `-h`, `--help`, `-V`, `--version`, `--show-settings`, `--show-files` |
+| `eslint` | `-h`, `--help`, `-v`, `--version`, `--print-config`, `--env-info`, `--init` |
+| `tsc` (case-insensitive) | `-h`, `--help`, `-?`, `-v`, `--version`, `--all`, `--showConfig`, `--init`, `--listFilesOnly` |
+| `cargo test` | `-h`, `--help`, `--no-run`, `--list` (harness, after `--`) |
+| `cargo build` | `-h`, `--help` |
+| `go test` (`-x` or `--x`) | `-h`, `-help`, `-n`, `-list`, `-list=...` |
+| `go build` (`-x` or `--x`) | `-h`, `-help`, `-n` |
+| `dotnet test` | `-h`, `--help`, `-?`, `/?`, `--list-tests`, `-t` |
+| `dotnet build` | `-h`, `--help`, `-?`, `/?` |
+| npm / pnpm / yarn scripts | `-h`, `--help`, `-?`, `-v`, `-V`, `--version` after the script name (the underlying tool is unknown) |
+
+The reason is a forensic invariant: `pytest --version` or `mypy --version` exiting 0 says
+nothing about the project's tests or types, so it must never become a `check.passed` that
+a future forensic engine could read as "the test suite passed" or "type checking passed".
+Matching is exact per argument; a flag's *value* (`pytest -k version`) is not a flag.
 
 **Explicit shell wrappers** are looked through, for classification only (argv passed to
 the child is never changed, and no shell is ever added): `cmd [/d] [/q] [/s] /c <command>`

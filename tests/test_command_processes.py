@@ -267,6 +267,7 @@ def test_recorder_process_ending_mid_command(recorder_process: RecorderProcess) 
 CHILD_WAITS = (
     "import pathlib,sys,time\n"
     "ready, beat = pathlib.Path(sys.argv[1]), pathlib.Path(sys.argv[2])\n"
+    "beat.write_text(str(time.monotonic()))\n"
     "ready.write_text('ready')\n"
     "deadline = time.monotonic() + 60\n"
     "while time.monotonic() < deadline:\n"

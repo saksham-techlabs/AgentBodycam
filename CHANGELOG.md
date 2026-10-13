@@ -105,5 +105,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Automatic check classification no longer turns informational or discovery-only runs of
+  recognised tools (`pytest --version`, `mypy --help`, `ruff check --help`,
+  `pytest --collect-only`, `cargo test --no-run`, `go test -list X`,
+  `dotnet test --list-tests`, `tsc --noEmit --showConfig`, `eslint --print-config`,
+  `npm test -- --help`, ...) into `check.passed` events. They stay plain commands;
+  explicit `--check` still classifies them.
+- Several processes creating `.agentbodycam/` subdirectories (e.g. `locks/`) at the same
+  moment could fail with `FileExistsError` (check-then-create race in the store).
 - A process could append an event after `session.stopped`: the recorder released the event
   lock between appending `session.stopped` and marking the session stopped.

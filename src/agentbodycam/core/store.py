@@ -296,7 +296,8 @@ class EventStore:
 
     def _ensure_dir(self, path: Path) -> None:
         if not self._existing_dir(path):
-            path.mkdir()
+            # Another process may create it between the check and mkdir.
+            path.mkdir(exist_ok=True)
             self._check_real(path, want_dir=True)
 
     def existing_store_file(self, path: Path) -> bool:

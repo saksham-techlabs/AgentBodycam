@@ -163,25 +163,82 @@ def test_explicit_overrides_automatic(live: Recorder, project: Path) -> None:
 # -- automatic ---------------------------------------------------------------------------
 
 
+UNITTEST_FILE = (
+    "import unittest\n\nclass T(unittest.TestCase):\n    def test_ok(self):\n        pass\n"
+)
+
+
 @pytest.mark.parametrize(
     ("module", "kind", "name"),
     [
-        (["pytest", "--version"], "test", "pytest"),
-        (["mypy", "--version"], "typecheck", "mypy"),
-        (["ruff", "check", "--help"], "lint", "ruff"),
-        (["unittest", "--help"], "test", "unittest"),
+        (["pytest", "-q", "-p", "no:cacheprovider", "test_ok.py"], "test", "pytest"),
+        (["unittest", "discover", "-p", "test_ok.py"], "test", "unittest"),
+        (["mypy", "--cache-dir", "{cache}", "ok.py"], "typecheck", "mypy"),
+        (["ruff", "check", "--no-cache", "--isolated", "ok.py"], "lint", "ruff"),
     ],
 )
 def test_automatic_classification_of_real_tools(
-    live: Recorder, project: Path, module: list[str], kind: str, name: str
+    live: Recorder, project: Path, tmp_path: Path, module: list[str], kind: str, name: str
 ) -> None:
-    code, err = run(project, sys.executable, "-m", *module)
+    (project / "test_ok.py").write_text(UNITTEST_FILE, encoding="utf-8")
+    (project / "ok.py").write_text("VALUE: int = 1\n", encoding="utf-8")
+    module = [str(tmp_path / "mypy-cache") if arg == "{cache}" else arg for arg in module]
+    # Run from outside the project, so the child runs in the project root.
+    code, err = run(project, sys.executable, "-B", "-m", *module)
     assert code == 0, err
     _, finished, check = only_check(live)
     assert check.type is EventType.CHECK_PASSED
     assert check.payload["kind"] == kind
     assert check.payload["name"] == name
     assert check.payload["classification"] == "automatic"
+    assert_paired(finished, check)
+
+
+@pytest.mark.parametrize(
+    "module",
+    [
+        ["pytest", "--version"],
+        ["pytest", "--help"],
+        ["pytest", "--collect-only", "-q", "-p", "no:cacheprovider"],
+        ["unittest", "--help"],
+        ["mypy", "--version"],
+        ["ruff", "check", "--help"],
+    ],
+)
+def test_informational_runs_are_commands_without_a_check(
+    live: Recorder, project: Path, module: list[str]
+) -> None:
+    (project / "test_ok.py").write_text(UNITTEST_FILE, encoding="utf-8")
+    code, err = run(project, sys.executable, "-B", "-m", *module)
+    assert code == 0, err
+    started, finished = command_events(live.store, live.session.session_id)
+    assert started.type is EventType.COMMAND_STARTED
+    assert finished.type is EventType.COMMAND_FINISHED
+    assert finished.payload["exit_code"] == 0
+    assert checks_of(live) == []
+
+
+def test_pytest_executable_version_is_not_a_check(live: Recorder, project: Path) -> None:
+    """`agentbodycam run -- pytest --version` (the pytest launcher next to this interpreter)."""
+    scripts = Path(sys.executable).parent
+    launcher = next((p for p in (scripts / "pytest.exe", scripts / "pytest") if p.is_file()), None)
+    if launcher is None:
+        pytest.skip("no pytest launcher next to the interpreter")
+    code, err = run(project, str(launcher), "--version")
+    assert code == 0, err
+    assert len(command_events(live.store, live.session.session_id)) == 2
+    assert checks_of(live) == []
+
+
+def test_explicit_check_on_an_informational_run_is_honoured(live: Recorder, project: Path) -> None:
+    code, err = run(project, sys.executable, "-m", "pytest", "--version", check="test")
+    assert code == 0, err
+    _, finished, check = only_check(live)
+    assert check.type is EventType.CHECK_PASSED
+    assert check.payload["kind"] == "test"
+    assert check.payload["name"] == "pytest"
+    assert check.payload["classification"] == "explicit"
+    assert check.summary == "Test passed: pytest"
     assert_paired(finished, check)
 
 

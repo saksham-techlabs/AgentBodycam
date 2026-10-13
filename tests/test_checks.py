@@ -110,6 +110,150 @@ def test_recognised_commands(argv: str, kind: CheckKind, name: str) -> None:
     assert auto(argv) == (kind, name)
 
 
+INFORMATIONAL = [
+    # pytest
+    "pytest --version",
+    "pytest -V",
+    "pytest --help",
+    "pytest -h",
+    "python -m pytest --version",
+    "python -m pytest --help",
+    "python -m pytest --collect-only",
+    "python -m pytest tests -q --collect-only",
+    "pytest --co",
+    "pytest --fixtures",
+    "pytest --markers",
+    "pytest --setup-plan",
+    # unittest / build
+    "python -m unittest --help",
+    "python -m unittest discover -h",
+    "python -m build --version",
+    # mypy / pyright
+    "mypy --version",
+    "mypy -V",
+    "mypy --help",
+    "python -m mypy --version",
+    "pyright --version",
+    "pyright --help",
+    "npx pyright --version",
+    # ruff / eslint
+    "ruff check --help",
+    "ruff check --show-settings",
+    "ruff check . --show-files",
+    "python -m ruff check --help",
+    "eslint --version",
+    "eslint -v",
+    "eslint --help",
+    "eslint --print-config config.js",
+    "eslint --env-info",
+    "npx eslint --version",
+    # tsc
+    "tsc --noEmit --help",
+    "tsc --noEmit --version",
+    "tsc --noEmit -v",
+    "tsc --noEmit --showConfig",
+    "tsc --noemit --SHOWCONFIG",
+    "tsc --noEmit --listFilesOnly",
+    "npx tsc --noEmit --showConfig",
+    # cargo
+    "cargo test --help",
+    "cargo test -h",
+    "cargo test --no-run",
+    "cargo test -- --list",
+    "cargo build --help",
+    # go
+    "go test -h",
+    "go test -help",
+    "go test -list TestFoo",
+    "go test -list=TestFoo",
+    "go test --list=TestFoo ./...",
+    "go test -n ./...",
+    "go build -h",
+    "go build -n",
+    # dotnet
+    "dotnet test --help",
+    "dotnet test -h",
+    "dotnet test -?",
+    "dotnet test --list-tests",
+    "dotnet test -t",
+    "dotnet build --help",
+    "dotnet build /?",
+    # package-manager scripts
+    "npm test -- --help",
+    "npm test --help",
+    "npm run test -- --help",
+    "npm run build -- --help",
+    "npm run lint -- --version",
+    "pnpm test -- --help",
+    "pnpm lint -- --help",
+    "pnpm run typecheck -- -h",
+    "yarn lint -- --help",
+    "yarn typecheck -- --help",
+    "yarn build -- -v",
+]
+
+
+@pytest.mark.parametrize("argv", INFORMATIONAL)
+def test_informational_invocations_are_not_automatic_checks(argv: str) -> None:
+    assert auto(argv) is None
+
+
+@pytest.mark.parametrize(
+    "argv",
+    [
+        ["cmd", "/c", "npm", "test", "--", "--help"],
+        ["cmd", "/c", "pytest --version"],
+        ["sh", "-c", "cargo test --no-run"],
+    ],
+)
+def test_informational_invocations_behind_wrappers(argv: list[str]) -> None:
+    assert auto(argv) is None
+
+
+@pytest.mark.parametrize(
+    ("argv", "kind", "name"),
+    [
+        ("pytest -q", TEST, "pytest"),
+        ("python -m pytest tests", TEST, "pytest"),
+        ("python -m pytest -k version", TEST, "pytest"),  # a value, not the flag
+        ("python -m unittest discover", TEST, "unittest"),
+        ("mypy src", TYPECHECK, "mypy"),
+        ("ruff check .", LINT, "ruff"),
+        ("eslint src", LINT, "eslint"),
+        ("tsc --noEmit", TYPECHECK, "tsc"),
+        ("cargo test", TEST, "cargo test"),
+        ("cargo test -- --nocapture", TEST, "cargo test"),
+        ("cargo build", BUILD, "cargo build"),
+        ("go test ./...", TEST, "go test"),
+        ("go test -run TestFoo ./...", TEST, "go test"),
+        ("go test -v ./...", TEST, "go test"),
+        ("dotnet test", TEST, "dotnet test"),
+        ("npm test", TEST, "npm test"),
+        ("npm test -- --watch=false", TEST, "npm test"),
+        ("npm run build", BUILD, "npm build"),
+        ("pnpm lint", LINT, "pnpm lint"),
+        ("yarn typecheck", TYPECHECK, "yarn typecheck"),
+    ],
+)
+def test_genuine_runs_are_still_automatic_checks(argv: str, kind: CheckKind, name: str) -> None:
+    assert auto(argv) == (kind, name)
+
+
+@pytest.mark.parametrize(
+    ("argv", "name"),
+    [
+        ("pytest --version", "pytest"),
+        ("python -m pytest --collect-only", "pytest"),
+        ("mypy --version", "mypy"),
+        ("cargo test --no-run", "cargo test"),
+        ("npm test -- --help", "npm test"),
+    ],
+)
+def test_explicit_check_still_classifies_informational_invocations(argv: str, name: str) -> None:
+    result = explicit_classification(TEST, argv.split())
+    assert result == CheckClassification(TEST, name, ClassificationSource.EXPLICIT)
+
+
 @pytest.mark.parametrize(
     "argv",
     [

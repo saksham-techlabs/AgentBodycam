@@ -234,7 +234,8 @@ check.passed       Test passed: pytest
 ```
 
 - `--check test|build|lint|typecheck` is authoritative. **Use it when certainty matters.**
-- Without `--check`, only a short whitelist of unmistakable commands is recognised:
+- Without `--check`, only a conservative whitelist of commands that appear to actually
+  execute a check is recognised:
   `pytest`, `python -m pytest`, `python -m unittest`, `cargo test`, `go test`,
   `dotnet test`; `python -m build`, `cargo build`, `go build`, `dotnet build`;
   `ruff check`, `python -m ruff check`, `eslint`; `mypy`, `python -m mypy`, `pyright`,
@@ -244,6 +245,12 @@ check.passed       Test passed: pytest
   [the exact rules](docs/architecture.md#check-results).
 - **Anything else stays a plain command**: `python script.py`, `make`, `bash build.sh`,
   `npm run custom` and so on are never guessed.
+- **Informational and discovery-only runs stay plain commands too**: `pytest --version`,
+  `mypy --help`, `pytest --collect-only`, `cargo test --no-run`, `go test -list X`,
+  `dotnet test --list-tests`, `tsc --noEmit --showConfig`, `npm test -- --help`, ...
+  They exit 0 without testing, linting or type checking anything, so they must never count
+  as evidence that the project's checks passed. (`--check` still forces a check if you
+  really want one.)
 - A check **passes only if the process exited by itself with status 0.** A non-zero exit,
   a signal, an interrupt (Ctrl+C) or a failure to start an explicit `--check` command is a
   failure, and the event says which (`reason`).

@@ -114,6 +114,18 @@ def test_many_processes_append_to_one_session(tmp_path: Path) -> None:
     assert_complete_log(store, sid, WRITERS, EVENTS_PER_WRITER)
 
 
+def test_directory_created_by_another_process_in_between_is_accepted(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Another writer creates locks/ after our existence check but before our mkdir."""
+    store = EventStore(project)
+    store.ensure_layout()
+    store.locks_dir.mkdir()
+    monkeypatch.setattr(store, "_existing_dir", lambda _path: False)
+    store._ensure_dir(store.locks_dir)  # must not raise FileExistsError
+    assert store.locks_dir.is_dir()
+
+
 def test_many_threads_append_through_separate_and_shared_stores(project: Path) -> None:
     shared = EventStore(project)
     sid = shared.create_session().session_id
