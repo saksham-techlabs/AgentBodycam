@@ -18,6 +18,20 @@ AgentBodycam is intended to record sensitive information about your projects
   would be sent before sending it.
 - **Read-only observation**: the recorder is meant to observe a project, not modify it.
 
+## What is stored today
+
+`agentbodycam session create` writes only inside `<project>/.agentbodycam/`:
+
+- `.gitignore` containing `*`, so session data is not committed by accident.
+- `sessions/<id>/session.json`: session ID, absolute project path, start/end time, status,
+  AgentBodycam version, and OS/Python platform details. No hostname, username or
+  environment variables.
+- `sessions/<id>/events.jsonl`: an empty, append-only event log. Events hold metadata such as
+  project-relative paths and short summaries, never file contents, and are size-capped.
+
+The project path can include your username (for example `C:\Users\<name>\...`); keep this
+in mind before sharing a session directory. No AgentBodycam code makes network requests.
+
 ## Reporting a vulnerability
 
 Please do **not** open a public issue for security problems.

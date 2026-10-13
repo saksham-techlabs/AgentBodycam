@@ -4,8 +4,8 @@
 
 > **EARLY DEVELOPMENT / NOT READY FOR PRODUCTION**
 >
-> AgentBodycam does not record anything yet. Only the CLI foundation exists.
-> Expect breaking changes.
+> AgentBodycam does not record anything yet. Only the CLI foundation and the local
+> session/event store exist. Expect breaking changes.
 
 ## What is this?
 
@@ -34,8 +34,9 @@ It is designed to be:
 | Area | Status |
 |---|---|
 | CLI foundation (`--help`, `--version`, `doctor`) | Implemented |
+| Event model + local append-only event store | Implemented (nothing produces events yet) |
+| `session create` / `list` / `show` | Implemented (empty sessions only) |
 | Universal recorder | Not started |
-| Event store | Not started |
 | Local forensics engine | Not started |
 | Replay UI | Not started |
 | Share/export | Not started |
@@ -73,6 +74,20 @@ python -m agentbodycam doctor
 
 `doctor` prints your Python version, operating system, current directory and whether Git
 is available. It does not change anything on your system.
+
+Session store (developer commands; nothing is recorded yet):
+
+```bash
+agentbodycam session create                 # create an empty session in ./.agentbodycam/
+agentbodycam session list
+agentbodycam session show <session-id>
+agentbodycam session list --project PATH    # operate on another project directory
+```
+
+Sessions live in `.agentbodycam/sessions/<session-id>/` (`session.json` + `events.jsonl`).
+AgentBodycam writes a `.agentbodycam/.gitignore` so recordings are never committed.
+See [docs/architecture.md](docs/architecture.md#32-evidence--event-store-implemented)
+for the event schema.
 
 ## Development
 

@@ -1,4 +1,4 @@
 """Core application logic.
 
-Future home of the recorder, event store and local forensics engine.
+Today: ``doctor`` and the local session/event store. Later: recorder and forensics engine.
 """

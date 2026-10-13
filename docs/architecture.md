@@ -1,8 +1,10 @@
 # AgentBodycam Architecture
 
-> Status: **design document**. Almost nothing described here is implemented yet.
-> As of v0.0.1 only the CLI foundation (`--help`, `--version`, `doctor`) exists.
-> This document describes the intended direction so future work stays coherent.
+> Status: **design document**. Most of what is described here is not implemented yet.
+> Implemented today: the CLI foundation (`--help`, `--version`, `doctor`), the typed
+> event/session model and the local append-only event store (section 3.2), managed with
+> `agentbodycam session create|list|show`. Nothing is recorded yet: no component produces
+> events. This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
 
@@ -99,16 +101,65 @@ Design notes:
   such as `.env` by default.
 - Must be safe: the recorder observes; it does not modify the user's project.
 
-### 3.2 Evidence / Event Store
+### 3.2 Evidence / Event Store (implemented)
 
-- Local, append-only log of normalized events per session.
-- Each event: id, monotonic sequence number, wall-clock timestamp, source
-  (recorder or a named adapter), type, and payload.
-- Large blobs (file contents, diffs, logs) stored content-addressed alongside the log.
-- Candidate format: SQLite (stdlib `sqlite3`) or JSON Lines plus a blob directory.
-  Decision deferred until the recorder exists.
-- Lives inside the project (e.g. `.agentbodycam/`) or a user data dir, configurable.
-- Schema is versioned so older sessions remain replayable.
+Code: `models/events.py`, `models/session.py`, `core/store.py`.
+
+**Storage layout** (inside the project root; never written anywhere else):
+
+```text
+.agentbodycam/
+  .gitignore                 "*" - recordings are never committed
+  sessions/
+    <session-id>/
+      session.json           session metadata (pretty JSON, sorted keys, atomic rewrite)
+      events.jsonl           append-only, one canonical JSON event per line
+```
+
+**Session** (`session.json`, `schema_version` 1): `session_id`, `project_root` (absolute),
+`started_at` / `ended_at` (UTC), `status` (`created` | `recording` | `stopped`),
+`agentbodycam_version`, and `platform` (OS name/release, machine, Python version and
+implementation). Hostname, username and environment variables are deliberately not stored.
+
+Session IDs look like `20261014T024500Z-9f2c4e7a1b3d5f60`: UTC start time (so IDs sort
+chronologically) plus 64 bits from `secrets`. Only that exact lowercase pattern is accepted,
+so an ID can never contain separators, `..`, drive letters or reserved device names.
+
+**Event** (`events.jsonl`, `schema_version` 1):
+
+| Field | Meaning |
+|---|---|
+| `event_id` | 128-bit random hex |
+| `session_id` | owning session |
+| `sequence` | 1, 2, 3, ... - authoritative order, contiguous |
+| `timestamp` | wall-clock UTC, `YYYY-MM-DDTHH:MM:SS.ffffffZ` |
+| `monotonic_ns` | `time.monotonic_ns()` at stamping; only comparable within one process |
+| `type` | `session.started`, `session.stopped`, `file.created`, `file.modified`, `file.deleted`, `git.snapshot`, `command.started`, `command.finished`, `check.passed`, `check.failed`, `error.observed` |
+| `source` | `agentbodycam`, `filesystem`, `git`, `command` |
+| `category` | `session`, `file`, `git`, `command`, `check`, `error` (fixed per type) |
+| `evidence` | `observed` or `inferred` - the store accepts **only `observed`** |
+| `summary` | short human-readable description |
+| `path` | normalized project-relative POSIX path, or `null` |
+| `payload` | JSON object with structured details |
+
+Producers submit an `EventDraft` (type, source, summary, path, payload); the store assigns
+`event_id`, `sequence`, timestamps and category.
+
+**Guarantees**
+
+- Lines are canonical JSON (sorted keys, compact, UTF-8, no NaN), terminated by `\n`,
+  written with a single append followed by `fsync`.
+- Reading is strict: blank lines, invalid UTF-8, malformed JSON, duplicate keys, unknown or
+  missing fields, a truncated final line, duplicate / out-of-order / missing sequence
+  numbers, duplicate event IDs and events from another session all raise
+  `CorruptEventLogError` with the file and line number. Nothing is silently skipped.
+- Appending to a log that fails validation is refused, so corruption is never extended.
+- Every directory and file used is verified to be a real (non-symlinked, non-junction)
+  path inside `<project>/.agentbodycam`; a symlink escaping the store is rejected.
+- Single writer per session is assumed; a second writer is detected by file-size change and
+  the log is re-validated before the next append.
+- Events are capped at 256 KiB and must not contain file contents. Large blobs (contents,
+  diffs, logs) will be stored content-addressed alongside the log in a later task.
 
 ### 3.3 Agent-specific adapters
 
@@ -168,9 +219,9 @@ Deterministic, offline analysis over the event store. No AI required. Planned ou
 src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
-  cli.py           argparse CLI (help, version, doctor)
-  core/            application logic (today: doctor; later: recorder, store, forensics)
-  models/          typed dataclasses shared across layers
+  cli.py           argparse CLI (help, version, doctor, session create/list/show)
+  core/            application logic (today: doctor, store; later: recorder, forensics)
+  models/          typed dataclasses shared across layers (environment, events, session)
   utils/           small dependency-free helpers (today: read-only git detection)
 ```
 
