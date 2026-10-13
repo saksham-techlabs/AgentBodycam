@@ -15,6 +15,12 @@ Every path the store writes to is checked to be a real (non-symlinked) location 
 ``<project>/.agentbodycam``. Any number of threads and processes may append to the same
 session: each append holds the session's event lock while it revalidates the log tail,
 assigns the next sequence number and writes one line.
+
+Live-recording producers use :meth:`EventStore.append_recording_event`, which checks that
+the session is ``recording`` while holding that same lock, and the recorder closes a session
+with :meth:`EventStore.stop_recording_session`, which appends ``session.stopped`` and marks
+the session ``stopped`` without releasing it. No append of any kind is accepted once a log
+contains ``session.stopped``.
 """
 
 from __future__ import annotations
@@ -23,6 +29,7 @@ import contextlib
 import json
 import os
 import secrets
+import sys
 import tempfile
 import threading
 import time
@@ -38,6 +45,7 @@ from agentbodycam.models.events import (
     MAX_EVENT_BYTES,
     Event,
     EventDraft,
+    EventType,
     EventValidationError,
     EvidenceKind,
     JsonValue,
@@ -63,6 +71,9 @@ GITIGNORE_CONTENT = (
 )
 
 _CREATE_ATTEMPTS = 5
+# Windows refuses to replace a file another process has open for an instant (e.g. a
+# reader of session.json or active.json); such a replace is retried for this long.
+_REPLACE_RETRY_SECONDS = 2.0
 
 
 class StoreError(Exception):
@@ -83,6 +94,14 @@ class CorruptSessionError(StoreError):
 
 class SessionStateError(StoreError):
     """A lifecycle transition is not allowed from the session's current status."""
+
+
+class SessionNotRecordingError(SessionStateError):
+    """A live-recording append or stop was refused: the session is not ``recording``."""
+
+
+class SessionClosedError(SessionNotRecordingError):
+    """The session's log already contains ``session.stopped``; nothing may follow it."""
 
 
 class EvidenceRejectedError(StoreError):
@@ -109,6 +128,7 @@ class _Tail:
     size: int
     last_sequence: int
     event_ids: set[str] = field(default_factory=set)
+    closed: bool = False  # the log contains session.stopped
 
 
 # OS locks are per handle; this keeps threads of one process from polling each other.
@@ -128,6 +148,10 @@ def _identity(st: os.stat_result) -> tuple[int, int]:
 
 def _utc_now() -> datetime:
     return datetime.now(UTC)
+
+
+def _closes(events: list[Event]) -> bool:
+    return any(event.type is EventType.SESSION_STOPPED for event in events)
 
 
 def _same_path(a: Path, b: Path) -> bool:
@@ -161,10 +185,24 @@ def atomic_write_text(path: Path, text: str) -> None:
             fh.write(text.encode("utf-8"))
             fh.flush()
             os.fsync(fh.fileno())
-        tmp.replace(path)
+        _replace(tmp, path)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
+
+
+def _replace(tmp: Path, path: Path) -> None:
+    deadline = time.monotonic() + _REPLACE_RETRY_SECONDS
+    backoff = 0.001
+    while True:
+        try:
+            tmp.replace(path)
+            return
+        except PermissionError:
+            if sys.platform != "win32" or time.monotonic() >= deadline:
+                raise
+        time.sleep(backoff)
+        backoff = min(backoff * 2, 0.05)
 
 
 def parse_event_log(data: bytes, *, path: Path, session_id: str) -> list[Event]:
@@ -370,27 +408,38 @@ class EventStore:
             )
         return session
 
-    def _transition(
-        self, session_id: str, expected: SessionStatus, target: SessionStatus
+    def _transition_locked(
+        self, session: Session, expected: SessionStatus, target: SessionStatus
     ) -> Session:
-        session = self.load_session(session_id)
+        """Rewrite ``session.json`` with ``target``. Must hold the session's event lock."""
         if session.status is not expected:
             raise SessionStateError(
-                f"session {session_id} is {session.status.value!r}; cannot mark it {target.value!r}"
+                f"session {session.session_id} is {session.status.value!r}; "
+                f"cannot mark it {target.value!r}"
             )
         ended_at = None
         if target is SessionStatus.STOPPED:
             ended_at = max(self._clock(), session.started_at)
         updated = replace(session, status=target, ended_at=ended_at)
-        self._write_session(self.session_dir(session_id), updated)
+        self._write_session(self.session_dir(session.session_id), updated)
         return updated
+
+    def _transition(
+        self, session_id: str, expected: SessionStatus, target: SessionStatus
+    ) -> Session:
+        self.load_session(session_id)
+        with self._event_lock(session_id):
+            return self._transition_locked(self.load_session(session_id), expected, target)
 
     def mark_recording(self, session_id: str) -> Session:
         """``created`` -> ``recording``. Rewrites ``session.json`` atomically."""
         return self._transition(session_id, SessionStatus.CREATED, SessionStatus.RECORDING)
 
     def mark_stopped(self, session_id: str) -> Session:
-        """``recording`` -> ``stopped`` with ``ended_at``. Rewrites ``session.json`` atomically."""
+        """``recording`` -> ``stopped`` with ``ended_at``. Rewrites ``session.json`` atomically.
+
+        Appends nothing; a recorder closes its session with :meth:`stop_recording_session`.
+        """
         return self._transition(session_id, SessionStatus.RECORDING, SessionStatus.STOPPED)
 
     def list_session_ids(self) -> list[str]:
@@ -429,6 +478,7 @@ class EventStore:
             size=len(data),
             last_sequence=len(events),
             event_ids={event.event_id for event in events},
+            closed=_closes(events),
         )
         return events
 
@@ -486,6 +536,7 @@ class EventStore:
                         size=tail.size + len(data),
                         last_sequence=tail.last_sequence + len(events),
                         event_ids=seen,
+                        closed=tail.closed or _closes(events),
                     )
                     self._tails[session_id] = tail
                     return tail
@@ -497,19 +548,81 @@ class EventStore:
     def append_event(self, session_id: str, draft: EventDraft) -> Event:
         """Stamp ``draft`` with identity, sequence and time, then append it durably.
 
-        Safe to call concurrently from any number of threads and processes.
+        Safe to call concurrently from any number of threads and processes. Works for a
+        session in any status (e.g. a developer-created empty session), but never after
+        ``session.stopped`` (:class:`SessionClosedError`). Producers writing into a live
+        recording use :meth:`append_recording_event` instead.
         """
-        if draft.evidence is not EvidenceKind.OBSERVED:
-            raise EvidenceRejectedError(
-                f"the event store only accepts observed evidence, got {draft.evidence.value!r}"
-            )
+        _require_observed(draft)
         self.events_path(session_id)
         with self._event_lock(session_id):
             return self._append_locked(session_id, draft)
 
+    def append_recording_event(
+        self,
+        session_id: str,
+        draft: EventDraft,
+        *,
+        check: Callable[[], None] | None = None,
+    ) -> Event:
+        """Append ``draft`` only if the session is ``recording`` at the moment of the append.
+
+        The status is read while holding the session's event lock, the same lock
+        :meth:`stop_recording_session` holds while it appends ``session.stopped`` and marks
+        the session stopped, so a stop can never slip in between the check and the append.
+        ``check``, if given, also runs while the lock is held, after the status check; it
+        raises to veto the append. Raises :class:`SessionNotRecordingError` otherwise.
+        ``session.stopped`` itself must go through :meth:`stop_recording_session`.
+        """
+        _require_observed(draft)
+        if draft.type is EventType.SESSION_STOPPED:
+            raise EventValidationError("session.stopped is appended by stop_recording_session()")
+        self.events_path(session_id)
+        with self._event_lock(session_id):
+            self._require_recording(session_id)
+            if check is not None:
+                check()
+            return self._append_locked(session_id, draft)
+
+    def stop_recording_session(self, session_id: str, draft: EventDraft) -> tuple[Event, Session]:
+        """Append the ``session.stopped`` ``draft`` and mark the session ``stopped``.
+
+        Both happen under one continuous hold of the session's event lock, so once this
+        returns no :meth:`append_recording_event` can succeed, and once ``session.stopped``
+        is in the log no append of any kind can follow it (even if marking the session
+        failed). Raises :class:`SessionNotRecordingError` if the session is not recording.
+        """
+        _require_observed(draft)
+        if draft.type is not EventType.SESSION_STOPPED:
+            raise EventValidationError(
+                f"stop_recording_session() appends session.stopped, got {draft.type.value!r}"
+            )
+        self.events_path(session_id)
+        with self._event_lock(session_id):
+            session = self._require_recording(session_id)
+            event = self._append_locked(session_id, draft)
+            stopped = self._transition_locked(
+                session, SessionStatus.RECORDING, SessionStatus.STOPPED
+            )
+            return event, stopped
+
+    def _require_recording(self, session_id: str) -> Session:
+        """The session, if it is ``recording``. Must hold the session's event lock."""
+        session = self.load_session(session_id)
+        if session.status is not SessionStatus.RECORDING:
+            raise SessionNotRecordingError(
+                f"session {session_id} is {session.status.value!r}, not 'recording'"
+            )
+        return session
+
     def _append_locked(self, session_id: str, draft: EventDraft) -> Event:
         path = self.events_path(session_id)
         tail = self._sync_tail(session_id, path)
+        if tail.closed:
+            raise SessionClosedError(
+                f"session {session_id} has already recorded session.stopped; "
+                "no event may be appended after it"
+            )
         event = Event(
             event_id=secrets.token_hex(16),
             session_id=session_id,
@@ -546,5 +659,13 @@ class EventStore:
             size=st.st_size,
             last_sequence=event.sequence,
             event_ids=tail.event_ids,
+            closed=event.type is EventType.SESSION_STOPPED,
         )
         return event
+
+
+def _require_observed(draft: EventDraft) -> None:
+    if draft.evidence is not EvidenceKind.OBSERVED:
+        raise EvidenceRejectedError(
+            f"the event store only accepts observed evidence, got {draft.evidence.value!r}"
+        )

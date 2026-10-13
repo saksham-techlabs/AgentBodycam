@@ -134,7 +134,12 @@ def read_active_record(store: EventStore) -> ActiveRecord | None:
     path = active_metadata_path(store)
     if not store.store_root_exists() or not store.existing_store_file(path):
         return None
-    data = path.read_bytes()
+    try:
+        data = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise ActiveSessionError(f"{path}: could not be read: {exc}") from exc
     if len(data) > MAX_ACTIVE_BYTES:
         raise ActiveSessionError(f"{path}: active metadata is too large")
     try:
@@ -301,7 +306,7 @@ def _inspect(store: EventStore) -> ActiveSessionInfo:
             record=record,
             reason=f"referenced session {record.session_id} does not exist",
         )
-    except (StoreError, EventValidationError) as exc:
+    except (StoreError, EventValidationError, OSError) as exc:
         return ActiveSessionInfo(
             ActiveState.INVALID, record=record, reason=f"referenced session is unreadable: {exc}"
         )

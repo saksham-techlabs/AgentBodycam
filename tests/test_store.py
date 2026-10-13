@@ -306,12 +306,15 @@ def test_unicode_payload_and_paths_round_trip(store: EventStore) -> None:
 
 def test_all_event_types_can_be_stored(store: EventStore) -> None:
     sid = store.create_session().session_id
-    for event_type in EventType:
+    # session.stopped must be last: nothing may be appended after it.
+    order: list[EventType] = [t for t in EventType if t is not EventType.SESSION_STOPPED]
+    order.append(EventType.SESSION_STOPPED)
+    for event_type in order:
         store.append_event(
             sid,
             EventDraft(type=event_type, source=EventSource.AGENTBODYCAM, summary=event_type.value),
         )
-    assert [e.type for e in store.read_events(sid)] == list(EventType)
+    assert [e.type for e in store.read_events(sid)] == order
 
 
 # -- corrupt logs -----------------------------------------------------------------------

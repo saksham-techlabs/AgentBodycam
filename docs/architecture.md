@@ -5,10 +5,11 @@
 > event/session model and the local append-only, process-safe event store (section 3.2),
 > managed with `agentbodycam session create|list|show|active`, the file-system and
 > read-only Git state parts of the universal recorder (`agentbodycam record`, section 3.1),
-> and the one-recorder-per-project active-recording lease (section 3.1, "Active recording
-> lease"). Command/test/build capture, adapters, forensics, replay, UI, export and AI are
-> not implemented. This document describes the intended direction so future work stays
-> coherent.
+> the one-recorder-per-project active-recording lease (section 3.1, "Active recording
+> lease") and explicit wrapped-command recording (`agentbodycam run -- ...`, section 3.1,
+> "Wrapped commands"). Test/build classification, capture of commands not launched through
+> `agentbodycam run`, adapters, forensics, replay, UI, export and AI are not implemented.
+> This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
 
@@ -88,17 +89,19 @@ Rules that follow from this:
 
 Agent-agnostic. Works with any coding agent because it watches the **project**, not the agent.
 
-**Implemented:** session lifecycle, file created / modified / deleted observation, and
+**Implemented:** session lifecycle, file created / modified / deleted observation,
 read-only Git state snapshots (code: `core/recorder.py`, `core/scanner.py`,
-`core/ignore.py`, `core/git_observer.py`, `utils/git.py`; CLI: `agentbodycam record`).
+`core/ignore.py`, `core/git_observer.py`, `utils/git.py`; CLI: `agentbodycam record`), and
+commands explicitly launched through `agentbodycam run -- ...` (code: `core/command.py`,
+`core/redact.py`; see "Wrapped commands" below).
 
 **Planned, not implemented:**
 
 - Git diffs (stored as content-addressed blobs, not inline in events).
-- Commands and processes **where observable** — for example commands launched through an
-  AgentBodycam wrapper (`agentbodycam run -- pytest`). We will not claim to see processes
-  the recorder cannot actually observe.
-- Test/build outcomes captured from wrapped commands (exit codes, durations, output).
+- Test/build/lint/typecheck classification of wrapped commands (`check.passed` /
+  `check.failed`), and bounded opt-in output capture. Commands not launched through
+  `agentbodycam run` are not observed, and we will not claim to see processes the recorder
+  cannot actually observe.
 - Native OS file watching (lower latency), `.gitignore` support, a user ignore file, and
   a dedicated rename event.
 
@@ -121,9 +124,13 @@ read-only Git state snapshots (code: `core/recorder.py`, `core/scanner.py`,
    looked at in the same poll when at least `git_interval` (2 s) has passed since the last
    Git observation.
 7. On stop, a final scan is made (for requested stops and duration expiry; it always
-   includes Git), then `session.stopped` is appended (payload: reason, scan count, baseline
-   size, per-kind event counts, errors observed, `git_snapshots`, `git_status`), then
-   `EventStore.mark_stopped()` sets status `stopped` and `ended_at`.
+   includes Git), then `EventStore.stop_recording_session()` appends `session.stopped`
+   (payload: reason, scan count, baseline size, per-kind event counts, errors observed,
+   `git_snapshots`, `git_status`) and sets status `stopped` and `ended_at` **under one
+   continuous hold of the session's event lock**, so no other process can append in
+   between (see section 3.2, "Recording appends and the stop").
+
+All recorder events are appended with `EventStore.append_recording_event()`.
 
 After `session.started` is appended, `active.json` is published; on stop it is removed after
 `session.stopped` and the `stopped` status are written, and then the lease is released
@@ -183,6 +190,151 @@ read-only and creates nothing. It returns:
 Only `active` may ever be used to attach to a session. The probe briefly takes the lock
 when it is free, then re-checks after reading so a recorder that stops mid-inspection is
 not reported as active.
+
+#### Wrapped commands
+
+Code: `core/command.py`, `core/redact.py`. CLI:
+
+```text
+agentbodycam run [--project DIR] -- <command> [args...]
+```
+
+Universal mode captures **only** commands explicitly launched this way. Terminal commands,
+shell history, other processes and agent-internal tool calls are not observed, and no event
+ever says who (person or agent) ran a command.
+
+**Parsing.** `main()` splits the command line at the first `--` before argparse sees it, so
+everything after it is the command's argv, verbatim (a later `--`, `--project` or `--help`
+belongs to the command). `run` without `--` or with nothing after it is a usage error (2).
+
+**Attachment.** `get_active_session()` must report `active`; the session ID and lease ID
+are kept. `invalid` (a live recorder is still publishing or already tearing down its
+metadata, or a transient read error) is retried with backoff (10 ms doubling to 100 ms)
+for at most 1 s; `inactive` and `stale` fail at once. On failure `run` prints
+`error: no active AgentBodycam recording for this project` / `Start one with: agentbodycam
+record`, exits 125 and **does not run the command**.
+
+**Appends.** Before `command.started` and again before `command.finished`, the attachment
+is re-confirmed (same bounded retry), then the event is appended with
+`EventStore.append_recording_event(check=...)`: while holding the session's event lock the
+store verifies the session is `recording` and the `check` verifies `get_active_session()`
+still reports `active` with the **same session ID and lease ID**. If the recording stopped
+or was replaced, nothing is appended. Before the start this aborts (`error: ...`, exit 125,
+command not run); before the finish the command has already completed normally and `run`
+prints `warning: the AgentBodycam recording ended before this command finished; the finish
+event was not recorded`. A finish event is never fabricated, backdated, written into a newer
+session, or written after `session.stopped`. (If the recorder is killed without stopping,
+its session stays `recording`; the lease check then sees `stale` and also skips the
+finish.)
+
+**Execution.** `subprocess.Popen(argv, executable=<resolved>, cwd=..., shell=False)`, with
+stdin, stdout, stderr and the environment inherited unchanged; nothing from them is read or
+stored. `command.started` is appended **before** the child is spawned, so anything the
+child changes is detected after it. Executable resolution never involves a shell or the
+current directory implicitly:
+
+- a name containing a path separator is resolved against the working directory;
+- a bare name is looked up only in absolute `PATH` entries (`.exe`, `.com` on Windows);
+- Windows batch scripts (`.bat`, `.cmd`, e.g. `npm.cmd`) are refused with
+  `ShellRequiredError` (exit 126, recorded as a spawn error) because `CreateProcess` would
+  silently run them through `cmd.exe`. The user can run `cmd /c ...` explicitly.
+
+**Working directory.** The current directory if it is inside the project (recorded as its
+normalized project-relative POSIX path, validated like event paths), otherwise the project
+root (`"."`). A directory inside `.agentbodycam/` is refused. The absolute path is never
+stored.
+
+**Signals.** While the child runs, `run` handles SIGINT and SIGBREAK (Windows) or SIGINT,
+SIGTERM and SIGHUP (POSIX) itself and keeps waiting, so it always outlives its child and
+records its real end:
+
+- Windows: a console Ctrl+C / Ctrl+Break is delivered by the console to every process
+  attached to it, including the child (same console and process group); nothing is
+  forwarded. A Python child ended by Ctrl+Break exits with `STATUS_CONTROL_C_EXIT`
+  (`0xC000013A` = 3221225786), which is recorded and propagated as is.
+- POSIX: SIGTERM is always forwarded to the child. SIGINT and SIGHUP are forwarded only
+  when `run` is not in its terminal's foreground process group (a terminal Ctrl+C was
+  already delivered to the child by the kernel; forwarding would deliver it twice).
+- Nothing is escalated: like a shell, `run` never kills a child that ignores the signal.
+  Only the direct child is ever signalled; no process trees or groups are killed.
+- An interrupt that arrives before the child is spawned prevents the spawn; the finish
+  event then says `outcome: interrupted` with `exit_code: null`, and `run` exits 130.
+- A hard kill of `run` itself (SIGKILL, `TerminateProcess`) cannot be handled; the child
+  then continues on its own and no finish event is recorded.
+
+Tested with real processes: Ctrl+Break to the wrapper's process group on Windows; SIGINT
+and SIGTERM to the wrapper only on POSIX.
+
+**Exit status.** `run` exits with the child's exit status; 128+N when POSIX signal N ended
+the child; on Windows NTSTATUS values such as `0xC000013A` are reproduced exactly.
+AgentBodycam's own failures: 125 (setup: no active recording, unsafe directory, store
+error), 126 (cannot execute: permission, batch script), 127 (not found), 130 (interrupted
+before the spawn). argparse usage errors exit 2.
+
+**`command.started`** (`source: command`, `path: null`):
+
+```json
+{"command_id": "bd1454a760fd5a4d1c6ca6b53b7b717f", "executable": "python",
+ "argv": ["python", "-m", "pytest", "--token", "<redacted>"], "argument_count": 4,
+ "argv_redacted": true, "argv_truncated": false, "argv_paths_rewritten": false,
+ "working_directory": ".", "shell": false, "stdio": "inherited",
+ "output_recorded": false, "environment_recorded": false,
+ "wrapper": {"kind": "agentbodycam-run", "pid": 25788}}
+```
+
+Summary: `Command started: python -m pytest --token <redacted>` (redacted form only,
+at most 300 characters of command text).
+
+**`command.finished`** (`source: command`, `path: null`):
+
+```json
+{"command_id": "bd1454a760fd5a4d1c6ca6b53b7b717f", "outcome": "exited", "exit_code": 0,
+ "signal": null, "signal_name": null, "duration_ms": 1162, "pid": 28384,
+ "interrupts": [], "error": null}
+```
+
+| `outcome` | Meaning |
+|---|---|
+| `exited` | the child exited by itself; `exit_code` holds its status |
+| `signaled` | POSIX: a signal ended the child; `signal` / `signal_name` set, `exit_code: null` |
+| `interrupted` | `run` received an interrupt (`interrupts` lists them, e.g. `["SIGINT"]`) while the child ran; `exit_code` / `signal` still say how the child ended (both null if it was never started) |
+| `spawn_error` | the child could not be started; `exit_code: null`, `pid: null`, `error: {"type": "FileNotFoundError", "errno": 2}` (type and errno only, never the OS message or a path) |
+
+`duration_ms` is measured with a monotonic clock from just before the spawn until the
+child was reaped. Summary: `Command finished: python -m pytest (exit 0)`,
+`(... interrupted, signal SIGINT)`, `(could not start: FileNotFoundError)`.
+
+**Redaction** (`core/redact.py`, deterministic, applied only to recorded evidence; the
+child always receives the original argv):
+
+- Names are normalised (lowercase; `_` and `.` become `-`) and are sensitive if they
+  contain `password`, `passwd`, `passphrase`, `secret`, `token`, `apikey`/`api-key`,
+  `accesskey`/`access-key`, `privatekey`/`private-key`, `credential`, `auth`, `bearer`,
+  `cookie`, `session-key` or `signature`, or equal `pass`, `pwd`, `key`, `pat` or `sig`.
+- `--name VALUE` / `-name VALUE`: VALUE becomes `<redacted>` (unless it starts with `--`).
+  `--name=VALUE`, `name=VALUE`, `NAME: VALUE` (e.g. `Authorization: Bearer x`) and
+  `pass:VALUE`: the value is redacted. `Bearer X` / `Basic X` / `Token X` inside an item,
+  and the item after a bare `Bearer`, are redacted.
+- URLs: `scheme://userinfo@` becomes `scheme://<redacted>@`; query parameters with
+  sensitive names are redacted.
+- Anywhere in an item: GitHub (`ghp_`, `gho_`, `ghu_`, `ghs_`, `ghr_`, `github_pat_`),
+  GitLab (`glpat-`), `sk-...` (OpenAI/Anthropic style), AWS access key IDs, Slack `xox?-`,
+  Google `AIza...`, Stripe, npm tokens, JWTs, any 32+ character run of token characters
+  mixing upper case, lower case and digits, and whole items containing a private-key block.
+  Lower-case hex (Git SHAs) is kept.
+- Paths: an absolute path (or `~...`), alone or as the value of `name=`, becomes its
+  normalized project-relative POSIX form (`.` for the root) if inside the project, otherwise
+  `<external-path>`. The project and home directories embedded elsewhere in an item become
+  `<project>` / `<home>`. `executable` is only the program's file name.
+- Bounds: at most 64 items, 256 characters per item, 4096 characters in total; redaction
+  happens before truncation. `argv_redacted`, `argv_truncated` and `argv_paths_rewritten`
+  record what happened; `argument_count` is the real number of arguments.
+
+Redaction is a safety net, not a guarantee: a secret in an unrecognised position or format
+can still be recorded.
+
+**Concurrency.** Any number of `agentbodycam run` processes may run against one recording
+at once; the store's per-session lock serialises their appends with the recorder's.
 
 #### Cross-platform file lock
 
@@ -453,6 +605,19 @@ Producers submit an `EventDraft` (type, source, summary, path, payload); the sto
   The result is no duplicate or skipped sequence numbers, no lost, overwritten or
   interleaved lines. Lock file names are derived only from validated session IDs.
   Producers that bypass `EventStore` are not protected.
+- **Recording appends and the stop.** `append_recording_event(session_id, draft,
+  check=None)` reads `session.json` **while holding the session's event lock** and refuses
+  (`SessionNotRecordingError`) unless the status is `recording`; an optional `check`
+  callback also runs under the lock and can veto the append. `stop_recording_session()`
+  appends `session.stopped` and rewrites `session.json` to `stopped` without releasing that
+  lock in between. Status transitions (`mark_recording`, `mark_stopped`) take the same
+  lock. So a recording append either happens entirely before the stop or is refused.
+- **Nothing after `session.stopped`.** Every append path (including the developer
+  `append_event`) refuses (`SessionClosedError`) once the log contains `session.stopped`,
+  checked from the revalidated log tail under the lock. This also holds if a crash left
+  `session.stopped` written but the status still `recording`.
+- On Windows, replacing `session.json` / `active.json` while another process has it open
+  fails for an instant; the atomic replace is retried for up to 2 s.
 - `monotonic_ns` values from different processes are not comparable; `sequence` is the
   authoritative order.
 - Events are capped at 256 KiB and must not contain file contents. Large blobs (contents,
@@ -517,9 +682,9 @@ src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
   cli.py           argparse CLI (help, version, doctor, session create/list/show/active,
-                   record)
+                   record, run)
   core/            application logic (doctor, filelock, store, active, ignore, scanner,
-                   git_observer, recorder; later: forensics)
+                   git_observer, recorder, command, redact; later: forensics)
   models/          typed dataclasses shared across layers (environment, events, session)
   utils/           small dependency-free helpers (today: Git detection and the bounded,
                    shell-free read-only Git command runner)

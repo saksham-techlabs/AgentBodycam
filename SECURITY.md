@@ -20,8 +20,8 @@ AgentBodycam is intended to record sensitive information about your projects
 
 ## What is stored today
 
-`agentbodycam session create` and `agentbodycam record` write only inside
-`<project>/.agentbodycam/`:
+`agentbodycam session create`, `agentbodycam record` and `agentbodycam run` write only
+inside `<project>/.agentbodycam/`:
 
 - `.gitignore` containing `*`, so session data is not committed by accident.
 - `sessions/<id>/session.json`: session ID, absolute project path, start/end time, status,
@@ -49,6 +49,29 @@ How Git is read:
   terminal prompts, and `GIT_DIR`-style redirection variables removed.
 - Git may still run clean filters configured by the repository (for example Git LFS) while
   computing status, exactly as a plain `git status` would.
+
+Wrapped commands (`agentbodycam run -- <command> [args...]`):
+
+- Only commands explicitly launched this way are recorded; AgentBodycam does not observe
+  any other terminal or process activity.
+- The command runs exactly as given: an argument list with no shell (`shell=False`), the
+  inherited environment, stdin, stdout and stderr. On Windows, batch scripts (`.bat`,
+  `.cmd`, e.g. `npm.cmd`) are refused rather than silently run through `cmd.exe`; run
+  `cmd /c ...` explicitly if you want a shell.
+- `command.started` stores a **redacted** copy of the arguments: values of options and
+  assignments with sensitive names (`--token X`, `--api-key=X`, `password=X`,
+  `Authorization: ...`), URL credentials and sensitive query parameters, recognisable API
+  keys/tokens and long random-looking strings become `<redacted>`; absolute paths become
+  project-relative or `<external-path>`, and the project and home directories are never
+  stored verbatim. The argument list is capped (64 items, 256 characters each, 4096 in
+  total). Redaction is pattern-based and conservative but cannot recognise every secret:
+  avoid passing secrets on the command line, as you would for shell history.
+- `command.finished` stores the exit code or signal, duration, child PID, an outcome and,
+  for a start failure, only the exception type and errno.
+- **Never stored:** command output (stdout/stderr), stdin, environment variables, the
+  absolute working directory or executable path.
+- The wrapped command itself is yours and may use the network or do anything else;
+  AgentBodycam's own code still makes no network requests.
 
 What `record` does **not** see or store:
 

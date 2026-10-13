@@ -5,6 +5,7 @@ from __future__ import annotations
 import ast
 import io
 import socket
+import sys
 from pathlib import Path
 from typing import Any, NoReturn
 
@@ -12,6 +13,7 @@ import pytest
 
 import agentbodycam
 from agentbodycam.cli import main
+from agentbodycam.core.recorder import Recorder
 from agentbodycam.core.store import EventStore
 from agentbodycam.models.events import EventDraft, EventSource, EventType
 from git_helpers import commit_all, init_repo, requires_git
@@ -92,6 +94,35 @@ def test_git_recording_works_with_network_disabled(project: Path) -> None:
     store = EventStore(project)
     [sid] = store.list_session_ids()
     assert EventType.GIT_SNAPSHOT in [e.type for e in store.read_events(sid)]
+
+
+@pytest.mark.usefixtures("no_network")
+def test_wrapped_command_works_with_network_disabled(project: Path, tmp_path: Path) -> None:
+    """AgentBodycam's own side of `run` needs no network (the child is the user's own)."""
+    recorder = Recorder(EventStore(project), record_git=False)
+    sid = recorder.start().session_id
+    marker = tmp_path / "ran"
+    try:
+        code = main(
+            [
+                "run",
+                "--project",
+                str(project),
+                "--",
+                sys.executable,
+                "-c",
+                "import pathlib,sys; pathlib.Path(sys.argv[1]).write_text('x')",
+                str(marker),
+            ],
+            out=io.StringIO(),
+            err=io.StringIO(),
+        )
+    finally:
+        recorder.stop()
+    assert code == 0
+    assert marker.exists()
+    types = [e.type for e in EventStore(project).read_events(sid)]
+    assert EventType.COMMAND_STARTED in types and EventType.COMMAND_FINISHED in types
 
 
 def test_package_source_imports_no_network_modules() -> None:

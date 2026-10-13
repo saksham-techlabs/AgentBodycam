@@ -256,10 +256,13 @@ class Recorder:
         return self.session.session_id
 
     def _emit(self, draft: EventDraft) -> Event:
-        event = self.store.append_event(self._require_active(), draft)
+        event = self.store.append_recording_event(self._require_active(), draft)
+        self._notify(event)
+        return event
+
+    def _notify(self, event: Event) -> None:
         if self._on_event is not None:
             self._on_event(event)
-        return event
 
     # -- lifecycle ---------------------------------------------------------------------
 
@@ -463,7 +466,9 @@ class Recorder:
     def stop(self, reason: StopReason = StopReason.REQUESTED) -> Session:
         """Append ``session.stopped``, mark the session ``stopped``, release the lease.
 
-        The lease is released even if closing the session fails.
+        The first two happen atomically with respect to every other writer of the session
+        (:meth:`EventStore.stop_recording_session`). The lease is released even if closing
+        the session fails.
         """
         session_id = self._require_active()
         try:
@@ -473,29 +478,28 @@ class Recorder:
 
     def _close_session(self, session_id: str, reason: StopReason) -> Session:
         stats = self.stats
-        self._emit(
-            EventDraft(
-                type=EventType.SESSION_STOPPED,
-                source=EventSource.AGENTBODYCAM,
-                summary="Recording stopped",
-                payload={
-                    "reason": reason.value,
-                    "scans": stats.scans,
-                    "baseline_files": stats.baseline_files,
-                    "files_tracked": len(self._snapshot or {}),
-                    "file_events": {
-                        "created": stats.created,
-                        "modified": stats.modified,
-                        "deleted": stats.deleted,
-                    },
-                    "errors_observed": stats.errors,
-                    "git_snapshots": stats.git_snapshots,
-                    "git_status": self._git_status.value,
+        draft = EventDraft(
+            type=EventType.SESSION_STOPPED,
+            source=EventSource.AGENTBODYCAM,
+            summary="Recording stopped",
+            payload={
+                "reason": reason.value,
+                "scans": stats.scans,
+                "baseline_files": stats.baseline_files,
+                "files_tracked": len(self._snapshot or {}),
+                "file_events": {
+                    "created": stats.created,
+                    "modified": stats.modified,
+                    "deleted": stats.deleted,
                 },
-            )
+                "errors_observed": stats.errors,
+                "git_snapshots": stats.git_snapshots,
+                "git_status": self._git_status.value,
+            },
         )
+        event, self._session = self.store.stop_recording_session(session_id, draft)
         self._stopped = True
-        self._session = self.store.mark_stopped(session_id)
+        self._notify(event)
         return self._session
 
     def run(self, *, duration: float | None = None) -> Session:

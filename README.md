@@ -5,9 +5,11 @@
 > **EARLY DEVELOPMENT / NOT READY FOR PRODUCTION**
 >
 > AgentBodycam can record file-system changes and read-only Git state changes in a project
-> (`agentbodycam record`). It does not yet capture commands, tests or builds, integrate with
-> any specific agent, analyse sessions, replay them, export them or provide a UI. It has no
-> AI features. Expect breaking changes.
+> (`agentbodycam record`), plus commands you explicitly launch through
+> `agentbodycam run -- <command>`. It does not observe arbitrary terminal commands, does
+> not classify test/build results, does not integrate with any specific agent, and does not
+> analyse sessions, replay them, export them or provide a UI. It has no AI features. Expect
+> breaking changes.
 
 ## What is this?
 
@@ -41,14 +43,18 @@ It is designed to be:
 | Universal recorder: file changes (`record`) | Implemented (polling, standard library only) |
 | Universal recorder: Git state (`record`) | Implemented (read-only Git commands) |
 | One active recording per project (OS-backed lease) | Implemented |
-| Universal recorder: command/test/build capture | Not started |
+| Wrapped command recording (`run -- <command>`) | Implemented (explicitly wrapped commands only) |
+| Automatic test/build/lint result classification | Not started |
+| Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
 | Local forensics engine | Not started |
 | Replay UI | Not started |
 | Share/export | Not started |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
 | Optional AI analysis | Not started |
 
-No external API, account or network access is needed for anything that exists today.
+No external API, account or network access is needed for anything that exists today, and
+AgentBodycam itself makes no network requests. (A command you wrap with `agentbodycam run`
+is your own program and may of course use the network.)
 
 See [docs/product-scope.md](docs/product-scope.md) and
 [docs/architecture.md](docs/architecture.md) for the plan.
@@ -140,7 +146,65 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: command/test/build capture, agent integrations, forensics, replay/UI, export or AI.
+- Not yet: test/build result classification, agent integrations, forensics, replay/UI,
+  export or AI.
+
+### Recording commands you run
+
+While `agentbodycam record` is running (terminal 1), run commands through
+`agentbodycam run` (terminal 2):
+
+```bash
+agentbodycam run -- python -m pytest
+agentbodycam run -- python script.py
+agentbodycam run -- git status
+agentbodycam run --project /path/to/app -- python build.py
+```
+
+Each wrapped command adds two events to the active session, paired by a random
+`command_id`:
+
+```text
+session.started
+git.snapshot
+command.started    Command started: python -m pytest
+file.modified      (whatever the command changed, as seen by the recorder)
+command.finished   Command finished: python -m pytest (exit 0)
+session.stopped
+```
+
+- **Only commands launched through `agentbodycam run -- ...` are captured.** AgentBodycam
+  does not watch your terminal, your shell history or other processes, and it never claims
+  that Cursor, Codex, Claude or anyone else ran a command; it records that the command ran.
+- Everything after `--` is passed to the command as an argument list, **without a shell**:
+  `&&`, `|`, `>`, `<` and `;` are ordinary arguments. If you want a shell, run it yourself:
+  `agentbodycam run -- sh -c "make && make test"` or `agentbodycam run -- cmd /c npm test`.
+- On Windows, `npm`, `npx`, `yarn` and similar tools are batch scripts (`npm.cmd`) that
+  only `cmd.exe` can run. AgentBodycam refuses to add that shell silently and tells you to
+  use `agentbodycam run -- cmd /c npm test` instead. Executables are looked up only in
+  absolute `PATH` entries, never implicitly in the current directory.
+- The command behaves like a normal terminal command: it inherits stdin, stdout, stderr and
+  the environment. **Its output, input and environment are never recorded.**
+- Arguments are recorded with likely secrets redacted (`--token X`, `--api-key=X`,
+  `password=X`, `https://user:pass@host`, recognisable API keys and tokens) and absolute
+  paths rewritten (project-relative, or `<external-path>`). The command itself always
+  receives the original arguments. See
+  [the redaction rules](docs/architecture.md#wrapped-commands).
+- `run` only works while a recording is active for the project. Otherwise it prints
+  `error: no active AgentBodycam recording for this project` and **does not run the
+  command**. If the recording stops while the command is running, the command still
+  finishes normally and a warning says the finish event was not recorded.
+- The command runs in the current directory if it is inside the project, otherwise in the
+  project root.
+- Exit status: `run` exits with the command's own exit status (128+N if a POSIX signal N
+  ended it). AgentBodycam's own failures use 125 (no active recording or other setup
+  error), 126 (cannot execute), 127 (executable not found) and 130 (interrupted before the
+  command started).
+- Ctrl+C reaches the command as usual; `run` waits for the command to exit, records how it
+  ended (`outcome: interrupted`), then exits with its status, so it never leaves the
+  command running on its own.
+- Test and build results are **not** classified yet: `python -m pytest` is recorded as a
+  command with an exit code, not as a passed or failed check.
 
 ### Session store
 

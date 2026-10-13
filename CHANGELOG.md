@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Wrapped command recording: `agentbodycam run [--project DIR] -- <command> [args...]`
+  attaches to the project's active recording (bounded 1 s retry while a recorder is
+  publishing its metadata; stale metadata is never used), appends `command.started`, runs
+  the command as an argv list with `shell=False` and inherited stdin/stdout/stderr and
+  environment, then appends `command.finished` (same random `command_id`; outcome `exited`,
+  `signaled`, `interrupted` or `spawn_error`; exit code or signal; duration). Both appends
+  re-verify the same session ID and lease ID while holding the session's event lock, so
+  nothing is written into another session or after `session.stopped`. Without an active
+  recording the command is not run. `run` exits with the command's status (AgentBodycam's
+  own failures: 125/126/127/130). Ctrl+C keeps `run` alive until its child exits; SIGTERM
+  is forwarded on POSIX. Windows batch scripts are refused instead of being run through a
+  hidden `cmd.exe`. Output, stdin and environment are never recorded.
+- Deterministic command-line redaction for recorded evidence (`core/redact.py`):
+  sensitive option/assignment values, URL credentials and query secrets, recognisable API
+  keys/tokens, random-looking strings, absolute paths (project-relative or
+  `<external-path>`), with item/length/size caps and `argv_redacted` / `argv_truncated`
+  flags.
+- `EventStore.append_recording_event()` (checks `recording` status, and an optional
+  caller check, while holding the session's event lock) and
+  `EventStore.stop_recording_session()` (appends `session.stopped` and marks the session
+  `stopped` under one continuous lock hold).
 - Process-safe event appends: `EventStore.append_event` serialises writers with a
   per-session OS lock (`.agentbodycam/locks/<session-id>.events.lock`) plus an in-process
   thread lock, revalidates bytes appended by other writers before assigning the next
@@ -59,3 +80,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ### Changed
 
 - `EventStore` no longer assumes a single writer per session.
+- The recorder appends through `append_recording_event()` and stops through
+  `stop_recording_session()`.
+- No event of any kind can be appended once a session log contains `session.stopped`
+  (`SessionClosedError`), even if the session status was left `recording` by a crash.
+- `mark_recording()` / `mark_stopped()` take the session's event lock.
+- On Windows, atomic replacement of `session.json` / `active.json` is retried briefly when
+  another process has the file open; active-session discovery treats a transient read
+  error as `invalid` instead of raising.
+
+### Fixed
+
+- A process could append an event after `session.stopped`: the recorder released the event
+  lock between appending `session.stopped` and marking the session stopped.

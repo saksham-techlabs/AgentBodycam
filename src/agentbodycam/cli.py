@@ -1,9 +1,10 @@
 """Command-line interface for AgentBodycam.
 
 Implemented: environment check, session-store commands (including the read-only
-``session active``) and the polling recorder (file changes and read-only Git state; one
-recorder per project). Command capture, forensics and replay are not implemented yet and
-are intentionally absent from the CLI.
+``session active``), the polling recorder (file changes and read-only Git state; one
+recorder per project) and explicit wrapped-command capture (``run -- <command>``).
+Test/build classification, forensics and replay are not implemented yet and are
+intentionally absent from the CLI.
 """
 
 from __future__ import annotations
@@ -24,6 +25,7 @@ from agentbodycam.core.active import (
     RecordingInProgressError,
     get_active_session,
 )
+from agentbodycam.core.command import run_wrapped_command
 from agentbodycam.core.doctor import collect_environment, format_report
 from agentbodycam.core.recorder import (
     DEFAULT_INTERVAL_SECONDS,
@@ -48,6 +50,7 @@ _EVENT_LABELS = {
     EventType.GIT_SNAPSHOT: "GIT",
     EventType.ERROR_OBSERVED: "ERROR",
 }
+RUN_USAGE = f"{PROG} run [-h] [--project DIR] -- <command> [args...]"
 _GIT_NOTES = {
     GitStatus.NOT_A_REPOSITORY: "Git: not a Git repository (Git state not recorded)",
     GitStatus.GIT_NOT_FOUND: "Git: executable not found (Git state not recorded)",
@@ -72,8 +75,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
         description=(
-            f"{TAGLINE}\n\nEarly development: only file-system and read-only Git state "
-            "recording are implemented (no command or agent capture yet)."
+            f"{TAGLINE}\n\nEarly development: file-system and read-only Git state recording, "
+            "plus commands explicitly launched with `agentbodycam run -- ...`. Other terminal "
+            "commands and agent internals are not captured."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -153,6 +157,28 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         metavar="SECONDS",
         help="Stop automatically after this many seconds (default: until Ctrl+C).",
+    )
+
+    subparsers.add_parser(
+        "run",
+        parents=[project],
+        usage=RUN_USAGE,
+        help="Run a command and record it in the active recording.",
+        description=(
+            "Run <command> [args...] and record command.started / command.finished in the "
+            "project's active recording (start one with `agentbodycam record`). Without an "
+            "active recording the command is not run.\n\n"
+            "Everything after `--` is passed to the command exactly as given: no shell is "
+            "involved, so `&&`, `|`, `>` and `;` are ordinary arguments. To use a shell, run "
+            "it explicitly (e.g. `cmd /c ...` or `sh -c ...`). stdin, stdout, stderr and the "
+            "environment are inherited and never recorded; arguments are recorded with "
+            "secrets redacted.\n\n"
+            "Exit status: the command's own exit status (128+N if a POSIX signal N ended it). "
+            "AgentBodycam's own failures: 125 (no active recording or other setup error), "
+            "126 (cannot execute), 127 (executable not found), 130 (interrupted before the "
+            "command started)."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
     )
     return parser
 
@@ -380,8 +406,22 @@ def main(
     stream = out if out is not None else sys.stdout
     err_stream = err if err is not None else sys.stderr
     parser = build_parser()
-    args = parser.parse_args(argv)
+    arguments = list(sys.argv[1:] if argv is None else argv)
+    # `run [options] -- <command...>`: everything after the first `--` belongs to the
+    # command and is never seen by argparse.
+    command_argv: list[str] | None = None
+    if arguments[:1] == ["run"] and "--" in arguments:
+        split = arguments.index("--")
+        arguments, command_argv = arguments[:split], arguments[split + 1 :]
+    args = parser.parse_args(arguments)
 
+    if args.command == "run":
+        if command_argv is None:
+            parser.error(f"run needs `--` before the command\nusage: {RUN_USAGE}")
+        if not command_argv:
+            parser.error(f"run needs a command after `--`\nusage: {RUN_USAGE}")
+        project: Path = args.project if args.project is not None else Path.cwd()
+        return run_wrapped_command(project, command_argv, err=err_stream)
     if args.command == "doctor":
         return _run_doctor(stream)
     if args.command == "session":
