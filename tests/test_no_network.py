@@ -65,6 +65,19 @@ def test_cli_session_commands_work_with_network_disabled(project: Path) -> None:
     assert main(["session", "show", sid, "--project", str(project)], out=io.StringIO()) == 0
 
 
+@pytest.mark.usefixtures("no_network")
+def test_recorder_works_with_network_disabled(project: Path) -> None:
+    out = io.StringIO()
+    assert main(["record", "--project", str(project), "--duration", "0.2"], out=out) == 0
+    assert "Recording stopped." in out.getvalue()
+    store = EventStore(project)
+    [sid] = store.list_session_ids()
+    assert [e.type for e in store.read_events(sid)] == [
+        EventType.SESSION_STARTED,
+        EventType.SESSION_STOPPED,
+    ]
+
+
 def test_package_source_imports_no_network_modules() -> None:
     offenders: list[str] = []
     for path in PACKAGE_DIR.rglob("*.py"):

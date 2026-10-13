@@ -3,8 +3,10 @@
 > Status: **design document**. Most of what is described here is not implemented yet.
 > Implemented today: the CLI foundation (`--help`, `--version`, `doctor`), the typed
 > event/session model and the local append-only event store (section 3.2), managed with
-> `agentbodycam session create|list|show`. Nothing is recorded yet: no component produces
-> events. This document describes the intended direction so future work stays coherent.
+> `agentbodycam session create|list|show`, and the file-system part of the universal
+> recorder (`agentbodycam record`, section 3.1). Git monitoring, command capture, adapters,
+> forensics, replay, UI, export and AI are not implemented. This document describes the
+> intended direction so future work stays coherent.
 
 ## 1. Goals and principles
 
@@ -84,22 +86,123 @@ Rules that follow from this:
 
 Agent-agnostic. Works with any coding agent because it watches the **project**, not the agent.
 
-Planned observations:
+**Implemented:** session lifecycle and file created / modified / deleted observation
+(code: `core/recorder.py`, `core/scanner.py`, `core/ignore.py`; CLI: `agentbodycam record`).
 
-- File created / modified / deleted / renamed, with timestamps and content hashes.
+**Planned, not implemented:**
+
 - Git state: HEAD, branch, staged/unstaged diffs, commits made during the session.
 - Commands and processes **where observable** — for example commands launched through an
   AgentBodycam wrapper (`agentbodycam run -- pytest`). We will not claim to see processes
   the recorder cannot actually observe.
 - Test/build outcomes captured from wrapped commands (exit codes, durations, output).
-- Session boundaries: start, stop, final project snapshot.
+- Native OS file watching (lower latency), `.gitignore` support, a user ignore file, and
+  a dedicated rename event.
 
-Design notes:
+#### Lifecycle
 
-- Use OS file-watching where reliable, plus periodic snapshot/diff as a fallback.
-- Respect `.gitignore` and a dedicated ignore file; never record secrets-bearing paths
-  such as `.env` by default.
-- Must be safe: the recorder observes; it does not modify the user's project.
+`agentbodycam record [--project DIR] [--interval SECONDS] [--duration SECONDS]`:
+
+1. `EventStore.create_session()` creates a new session (`created`). Each run is a new session.
+2. `EventStore.mark_recording()` sets status `recording` (atomic `session.json` rewrite).
+3. `session.started` is appended (payload: recorder kind, interval, hash limit, the exact
+   ignore policy in force).
+4. A **baseline snapshot** is taken. Files already present produce no events.
+5. The project is polled every `interval` seconds (default 0.5). Each poll is a full
+   snapshot diffed against the previous one; one event is appended per change.
+6. On stop, a final scan is made (for requested stops), then `session.stopped` is appended
+   (payload: reason, scan count, baseline size, per-kind event counts, errors observed),
+   then `EventStore.mark_stopped()` sets status `stopped` and `ended_at`.
+
+Stop reasons: `requested` (Ctrl+C, SIGTERM or Ctrl+Break, handled as a flag so a scan or
+append is never interrupted half-way), `duration`, `interrupted` (a second Ctrl+C forces
+`KeyboardInterrupt`; no final scan), `error` (unexpected exception; the session is still
+closed when possible, then the error propagates). A crash or kill -9 leaves the session in
+`recording` with no `ended_at`.
+
+#### Change detection
+
+Polling with the standard library only (no runtime dependencies). Per regular file the
+scanner records `size`, `mtime_ns`, a file identity (`st_ino`) and a SHA-256.
+
+- If `(size, mtime_ns, file identity)` is unchanged since the last scan, the previous hash
+  is reused and the file is not reopened.
+- Otherwise the file is re-hashed. **`file.modified` is emitted only if the SHA-256
+  differs** (`change_evidence: "sha256"`). Touching a file or rewriting identical bytes
+  produces no event. When a hash is unavailable on either side (too large / unreadable),
+  a change in size or mtime is reported with `change_evidence: "metadata"`.
+- A path that appears is `file.created`; one that disappears is `file.deleted`. A rename is
+  a delete plus a create; there is no rename event yet.
+- Within one scan, events are ordered created, modified, deleted, each sorted by path.
+  `timestamp` is the **detection** time (up to one interval after the change); `mtime` is
+  what the OS reported. The `scan` payload field groups events detected together.
+
+Event payloads (`file.created`/`file.modified` describe the new state; `previous` holds the
+last known state for `file.modified`/`file.deleted`):
+
+```json
+{"size": 13, "mtime_ns": 1791927834651000200, "mtime": "2026-10-13T21:43:54.651000Z",
+ "sha256": "cbacb153...", "hash_status": "complete", "detected_by": "polling", "scan": 3,
+ "change_evidence": "sha256", "previous": {"size": 13, "sha256": "be1177a0...", "...": "..."}}
+```
+
+#### Hashing
+
+- SHA-256, streamed in 1 MiB chunks; files are never loaded whole and contents are
+  discarded immediately after hashing. Nothing but the hex digest is kept.
+- Files larger than **256 MiB** (`DEFAULT_MAX_HASH_BYTES`) are not hashed:
+  `sha256: null`, `hash_status: "too_large"`, and changes are detected from size/mtime.
+- Other `hash_status` values: `complete`, `unreadable` (open/read failed persistently),
+  `unstable` (the file kept changing while being hashed).
+- Files are opened without following links (`O_NOFOLLOW` on POSIX;
+  `FILE_FLAG_OPEN_REPARSE_POINT` on Windows) and the opened file's identity is checked
+  against the listed one, so a file swapped for a symlink mid-scan is never read through.
+- On Windows files are opened with read/write/delete sharing so hashing never blocks an
+  editor deleting or renaming the file. (Windows still refuses to rename *another* file
+  over a file that is open, so an atomic save that coincides with a hash can fail for that
+  instant; editors normally retry.) On POSIX, FIFOs and devices are never opened.
+
+#### Default ignore policy
+
+Matching is per path component (file or directory name), **case-insensitive**. A
+matching directory is pruned (never listed); a matching file is never opened. Ignored
+entries appear in no event. The exact policy is also written into `session.started`.
+
+| Kind | Names / patterns |
+|---|---|
+| Ignored names (anywhere in the tree) | `.agentbodycam`, `.git`, `.hg`, `.svn`, `.venv`, `venv`, `node_modules`, `__pycache__`, `.pytest_cache`, `.mypy_cache`, `.ruff_cache`, `.tox`, `.nox` |
+| Sensitive (never opened, hashed or named) | `.env`, `.env.*`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx`, `id_rsa`, `id_rsa.*`, `id_dsa`, `id_dsa.*`, `id_ecdsa`, `id_ecdsa.*`, `id_ed25519`, `id_ed25519.*` |
+| Noise | `*.swp`, `*.swo`, `*.swx`, `*~`, `.#*`, `.DS_Store`, `Thumbs.db` |
+
+`.gitignore` is **not** parsed yet: other build output (for example `dist/`) is recorded.
+A `.git` *file* (worktrees/submodules) is ignored as well.
+
+#### Path safety
+
+- Paths are built only from the resolved project root plus directory-entry names, and
+  stored as normalized project-relative POSIX paths (validated by the event model). Names
+  that cannot be represented (e.g. containing `\` on POSIX, or undecodable bytes) are
+  skipped and reported as `error.observed` without a path.
+- Symlinks are never followed (`lstat`). On Windows, junctions and any other
+  name-surrogate reparse point are treated as links and skipped; non-link reparse points
+  such as cloud placeholders are scanned normally.
+- Only regular files are observed; FIFOs, sockets and devices are skipped.
+- The recorder writes nothing except through `EventStore`, which writes only inside
+  `.agentbodycam/`.
+
+#### Errors and races
+
+- A file that disappears between listing and hashing, or is replaced or still being written
+  while hashed, keeps its previous state for that scan; the next scan settles it. A race
+  is never reported as a deletion or modification by itself.
+- A read failure (locked, permission denied) is retried silently once. If it persists into
+  the next scan, one `error.observed` is recorded (payload: `operation`, `error` type name,
+  `errno`, OS `detail` text — never absolute paths or contents), and the file is tracked
+  with `hash_status: "unreadable"`. The same ongoing problem is reported once, not on every
+  scan; it may be reported again if it clears and recurs.
+- A directory that cannot be listed produces one `error.observed`, and the files known
+  under it are kept (not reported as deleted).
+- One bad file never stops the recording.
 
 ### 3.2 Evidence / Event Store (implemented)
 
@@ -219,8 +322,9 @@ Deterministic, offline analysis over the event store. No AI required. Planned ou
 src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
-  cli.py           argparse CLI (help, version, doctor, session create/list/show)
-  core/            application logic (today: doctor, store; later: recorder, forensics)
+  cli.py           argparse CLI (help, version, doctor, session create/list/show, record)
+  core/            application logic (doctor, store, ignore, scanner, recorder;
+                   later: forensics)
   models/          typed dataclasses shared across layers (environment, events, session)
   utils/           small dependency-free helpers (today: read-only git detection)
 ```

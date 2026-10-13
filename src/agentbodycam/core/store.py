@@ -21,7 +21,7 @@ import secrets
 import tempfile
 import time
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -39,6 +39,7 @@ from agentbodycam.models.events import (
 from agentbodycam.models.session import (
     PlatformInfo,
     Session,
+    SessionStatus,
     new_session_id,
     validate_session_id,
 )
@@ -69,6 +70,10 @@ class SessionNotFoundError(StoreError):
 
 class CorruptSessionError(StoreError):
     pass
+
+
+class SessionStateError(StoreError):
+    """A lifecycle transition is not allowed from the session's current status."""
 
 
 class EvidenceRejectedError(StoreError):
@@ -288,6 +293,29 @@ class EventStore:
                 f"{path}: session_id {session.session_id!r} does not match directory"
             )
         return session
+
+    def _transition(
+        self, session_id: str, expected: SessionStatus, target: SessionStatus
+    ) -> Session:
+        session = self.load_session(session_id)
+        if session.status is not expected:
+            raise SessionStateError(
+                f"session {session_id} is {session.status.value!r}; cannot mark it {target.value!r}"
+            )
+        ended_at = None
+        if target is SessionStatus.STOPPED:
+            ended_at = max(self._clock(), session.started_at)
+        updated = replace(session, status=target, ended_at=ended_at)
+        self._write_session(self.session_dir(session_id), updated)
+        return updated
+
+    def mark_recording(self, session_id: str) -> Session:
+        """``created`` -> ``recording``. Rewrites ``session.json`` atomically."""
+        return self._transition(session_id, SessionStatus.CREATED, SessionStatus.RECORDING)
+
+    def mark_stopped(self, session_id: str) -> Session:
+        """``recording`` -> ``stopped`` with ``ended_at``. Rewrites ``session.json`` atomically."""
+        return self._transition(session_id, SessionStatus.RECORDING, SessionStatus.STOPPED)
 
     def list_session_ids(self) -> list[str]:
         """IDs of session directories, oldest first. Unrecognised entries are ignored."""

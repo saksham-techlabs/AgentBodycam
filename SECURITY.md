@@ -20,14 +20,31 @@ AgentBodycam is intended to record sensitive information about your projects
 
 ## What is stored today
 
-`agentbodycam session create` writes only inside `<project>/.agentbodycam/`:
+`agentbodycam session create` and `agentbodycam record` write only inside
+`<project>/.agentbodycam/`:
 
 - `.gitignore` containing `*`, so session data is not committed by accident.
 - `sessions/<id>/session.json`: session ID, absolute project path, start/end time, status,
   AgentBodycam version, and OS/Python platform details. No hostname, username or
   environment variables.
-- `sessions/<id>/events.jsonl`: an empty, append-only event log. Events hold metadata such as
-  project-relative paths and short summaries, never file contents, and are size-capped.
+- `sessions/<id>/events.jsonl`: an append-only event log. `record` adds session start/stop
+  events and one event per observed file creation, modification or deletion: the
+  project-relative path, size, modification time and SHA-256 of the file. **File contents
+  are never stored.** Events are size-capped.
+
+What `record` does **not** see or store:
+
+- Anything under `.agentbodycam/`, `.git/`, `.venv/`, `venv/`, `node_modules/`, caches, and
+  other default-ignored locations (see `docs/architecture.md`, section 3.1).
+- Likely secret files: `.env`, `.env.*`, `.envrc`, `*.pem`, `*.key`, `*.p12`, `*.pfx` and
+  SSH private-key names. They are skipped by name before being opened, so neither their
+  path, contents nor hash is recorded.
+- Anything reached through a symlink or junction. Links are never followed, so the
+  recorder never reads outside the project root.
+
+A SHA-256 of a small or guessable file can confirm a guess of its contents; treat session
+directories as sensitive. Error events contain only the exception type, errno and the OS
+error text, never the absolute path or file contents.
 
 The project path can include your username (for example `C:\Users\<name>\...`); keep this
 in mind before sharing a session directory. No AgentBodycam code makes network requests.
