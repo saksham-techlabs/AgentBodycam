@@ -8,6 +8,11 @@ or half-published one), appends ``command.started``, runs the command exactly as
 lock, that the very same recording (session ID *and* lease ID) is still live, so nothing is
 ever written into another session or after ``session.stopped``.
 
+If the command is classified as a check (``--check KIND``, or automatically for a short
+whitelist of unmistakable command lines, see :mod:`agentbodycam.core.checks`), a
+``check.passed`` or ``check.failed`` event with its own ``check_id`` and the command's
+``command_id`` is appended after ``command.finished``, and only if that finish was recorded.
+
 Only facts are recorded: which (redacted) command ran, where, when, for how long and how it
 ended. Command output, stdin and environment variables are never recorded, and nothing is
 attributed to any person or agent. AgentBodycam itself makes no network request; the
@@ -32,6 +37,15 @@ from types import FrameType
 from typing import TextIO
 
 from agentbodycam.core.active import ActiveSessionInfo, ActiveState, get_active_session
+from agentbodycam.core.checks import (
+    CheckClassification,
+    CheckKind,
+    CheckReason,
+    ClassificationSource,
+    classify_command,
+    explicit_classification,
+    judge,
+)
 from agentbodycam.core.redact import RedactedCommand, default_home, redact_command
 from agentbodycam.core.store import (
     STORE_DIRNAME,
@@ -478,6 +492,51 @@ def finished_draft(command_id: str, command: RedactedCommand, result: CommandRes
     )
 
 
+def new_check_id() -> str:
+    return secrets.token_hex(16)
+
+
+def should_record_check(classification: CheckClassification, result: CommandResult) -> bool:
+    """An explicit check always gets a result; an automatic one only if it really started."""
+    return classification.source is ClassificationSource.EXPLICIT or result.pid is not None
+
+
+def _check_detail(result: CommandResult, reason: CheckReason) -> str:
+    if reason is CheckReason.SPAWN_ERROR:
+        return "could not start"
+    if reason is CheckReason.SIGNALED and result.signal is not None:
+        return f"signal {_signal_name(result.signal) or result.signal}"
+    if reason is CheckReason.INTERRUPTED:
+        return "interrupted" + ("" if result.exit_code is None else f", exit {result.exit_code}")
+    return f"exit {result.exit_code}"
+
+
+def check_draft(
+    check_id: str, command_id: str, classification: CheckClassification, result: CommandResult
+) -> EventDraft:
+    passed, reason = judge(result.outcome.value, result.exit_code)
+    verdict = "passed" if passed else "failed"
+    summary = f"{classification.kind.label} {verdict}: {classification.name}"
+    if not passed:
+        summary += f" ({_check_detail(result, reason)})"
+    return EventDraft(
+        type=EventType.CHECK_PASSED if passed else EventType.CHECK_FAILED,
+        source=EventSource.COMMAND,
+        summary=_summary(summary),
+        payload={
+            "check_id": check_id,
+            "command_id": command_id,
+            "kind": classification.kind.value,
+            "name": classification.name,
+            "classification": classification.source.value,
+            "result": verdict,
+            "reason": reason.value,
+            "exit_code": result.exit_code,
+            "duration_ms": result.duration_ms,
+        },
+    )
+
+
 # -- running ---------------------------------------------------------------------------
 
 
@@ -588,11 +647,19 @@ def run_wrapped_command(
     *,
     err: TextIO,
     cwd: Path | None = None,
+    check: CheckKind | None = None,
     attach_timeout: float = ATTACH_TIMEOUT_SECONDS,
 ) -> int:
-    """``agentbodycam run``: returns the process exit code (normally the child's)."""
+    """``agentbodycam run``: returns the process exit code (normally the child's).
+
+    ``check`` classifies the command explicitly; without it, automatic classification
+    applies. Classification never changes what is run.
+    """
     if not argv:
         raise ValueError("argv must not be empty")
+    classification = (
+        classify_command(argv) if check is None else explicit_classification(check, argv)
+    )
     project_root = Path(project).resolve()
     try:
         attachment = attach_active_session(project_root, timeout=attach_timeout)
@@ -634,9 +701,11 @@ def run_wrapped_command(
         result, spawn_error = execute(argv, run_dir, relay)
         if spawn_error is not None:
             _write(err, _spawn_error_message(argv[0], spawn_error))
+        finished_recorded = False
         try:
             confirm_attachment(attachment, timeout=attach_timeout)
             append_to_recording(store, attachment, finished_draft(command_id, command, result))
+            finished_recorded = True
         except RecordingChangedError:
             _write(
                 err,
@@ -645,4 +714,26 @@ def run_wrapped_command(
             )
         except (StoreError, EventValidationError, OSError) as exc:
             _write(err, f"warning: the finish event could not be recorded: {exc}\n")
+        if (
+            finished_recorded
+            and classification is not None
+            and should_record_check(classification, result)
+        ):
+            draft = check_draft(new_check_id(), command_id, classification, result)
+            _record_check(store, attachment, draft, err, attach_timeout)
     return process_exit_status(result.wrapper_exit_code)
+
+
+def _record_check(
+    store: EventStore, attachment: Attachment, draft: EventDraft, err: TextIO, timeout: float
+) -> None:
+    try:
+        confirm_attachment(attachment, timeout=timeout)
+        append_to_recording(store, attachment, draft)
+    except RecordingChangedError:
+        _write(
+            err,
+            "warning: the AgentBodycam recording ended before the check result could be recorded\n",
+        )
+    except (StoreError, EventValidationError, OSError) as exc:
+        _write(err, f"warning: the check result could not be recorded: {exc}\n")

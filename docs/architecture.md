@@ -7,7 +7,8 @@
 > read-only Git state parts of the universal recorder (`agentbodycam record`, section 3.1),
 > the one-recorder-per-project active-recording lease (section 3.1, "Active recording
 > lease") and explicit wrapped-command recording (`agentbodycam run -- ...`, section 3.1,
-> "Wrapped commands"). Test/build classification, capture of commands not launched through
+> "Wrapped commands") with deterministic check results (`check.passed` / `check.failed`,
+> section 3.1, "Check results"). Capture of commands not launched through
 > `agentbodycam run`, adapters, forensics, replay, UI, export and AI are not implemented.
 > This document describes the intended direction so future work stays coherent.
 
@@ -93,13 +94,13 @@ Agent-agnostic. Works with any coding agent because it watches the **project**, 
 read-only Git state snapshots (code: `core/recorder.py`, `core/scanner.py`,
 `core/ignore.py`, `core/git_observer.py`, `utils/git.py`; CLI: `agentbodycam record`), and
 commands explicitly launched through `agentbodycam run -- ...` (code: `core/command.py`,
-`core/redact.py`; see "Wrapped commands" below).
+`core/redact.py`; see "Wrapped commands" below) and their test/build/lint/typecheck results
+(code: `core/checks.py`; see "Check results" below).
 
 **Planned, not implemented:**
 
 - Git diffs (stored as content-addressed blobs, not inline in events).
-- Test/build/lint/typecheck classification of wrapped commands (`check.passed` /
-  `check.failed`), and bounded opt-in output capture. Commands not launched through
+- Bounded opt-in output capture for wrapped commands. Commands not launched through
   `agentbodycam run` are not observed, and we will not claim to see processes the recorder
   cannot actually observe.
 - Native OS file watching (lower latency), `.gitignore` support, a user ignore file, and
@@ -335,6 +336,84 @@ can still be recorded.
 
 **Concurrency.** Any number of `agentbodycam run` processes may run against one recording
 at once; the store's per-session lock serialises their appends with the recorder's.
+
+#### Check results
+
+Code: `core/checks.py` (pure: no processes, files or output), wired in `core/command.py`.
+
+```text
+agentbodycam run [--project DIR] [--check {test,build,lint,typecheck}] -- <command> [args...]
+```
+
+A check event records an **observed outcome** ("pytest exited 1", "Test check failed"),
+never a cause ("this edit fixed the tests"). Each invocation is an independent check.
+
+**Classification.** `--check KIND` is authoritative and overrides automatic
+classification (an invalid KIND is a usage error, exit 2, nothing runs). Without it, the
+argv is matched against this whitelist, and nothing else:
+
+| Kind | Recognised (program base name, case-insensitive, `.exe`/`.cmd`/`.bat`/`.com` ignored) | Name |
+|---|---|---|
+| test | `pytest ...` | `pytest` |
+| test | `PY -m pytest ...`, `PY -m unittest ...` | `pytest`, `unittest` |
+| test | `cargo test`, `go test`, `dotnet test` (subcommand first) | `cargo test`, ... |
+| build | `PY -m build ...` | `build` |
+| build | `cargo build`, `go build`, `dotnet build` | `cargo build`, ... |
+| lint | `ruff check ...`, `PY -m ruff check ...` | `ruff` |
+| lint | `eslint ...`, `npx eslint ...` | `eslint` |
+| typecheck | `mypy ...`, `PY -m mypy ...`, `pyright ...`, `PY -m pyright ...`, `npx pyright ...` | `mypy`, `pyright` |
+| typecheck | `tsc ... --noEmit ...` (not `--noEmit false`), `npx tsc ... --noEmit ...` | `tsc` |
+| any | `npm test`, `npm run[-script] S`, `pnpm [run] S`, `yarn [run] S`, S in `test`, `build`, `lint`, `typecheck` | `npm test`, `npm build`, `pnpm lint`, ... |
+
+`PY` is `python`, `python3`, `python3.N` or the Windows launcher `py` (optionally with a
+version flag such as `-3.12`), followed only by value-less flags from `-B -E -I -O -OO -q
+-s -S -u`, then `-m MODULE`. Anything else (`python script.py`, `python -W error -m
+pytest`, `npm run custom`, `npm --prefix x test`, `make`, `bash build.sh`, `cargo clippy`,
+`ruff format`) is **not classified** and stays a plain command.
+
+**Explicit shell wrappers** are looked through, for classification only (argv passed to
+the child is never changed, and no shell is ever added): `cmd [/d] [/q] [/s] /c <command>`
+(as separate arguments or one string), and `sh|bash|zsh|dash -c "<command>"` (exactly
+those three arguments). The wrapped command must consist of plain words only: quotes,
+escapes, `&`, `|`, `<`, `>`, `;`, `^`, `%`, `$`, backticks, globs or newlines leave it
+unclassified. One level of wrapping only.
+
+**Names** are fixed strings for recognised tools. For an explicit `--check` on an
+unrecognised command the name is the program's lowercase base name (after unwrapping)
+if it matches `[a-z0-9][a-z0-9._+-]{0,31}` and does not look like a token, otherwise
+`command`. Names are never built from arguments.
+
+**Pass/fail.** `check.passed` only when `outcome == exited` and `exit_code == 0`.
+Otherwise `check.failed` with `reason`: `nonzero_exit`, `signaled`, `interrupted` (even if
+the child then exited 0) or `spawn_error`. Output is never read.
+
+**When a check event is written.** After `command.finished` was appended, and only then;
+the attachment is re-confirmed and the event is appended with the same
+`append_recording_event(check=...)` guard (same session ID and lease ID, session still
+`recording`). If the finish was not recorded, no check event is attempted; if the
+recording ends between the two, the check is skipped with `warning: the AgentBodycam
+recording ended before the check result could be recorded`. Nothing is ever written after
+`session.stopped` or into another session. An **explicit** check always gets a result,
+including `spawn_error` (the requested check could not execute) and an interrupt before
+the spawn; an **automatic** one only when the process actually started (a missing `pytest`
+or a Windows `npm` refused without `cmd /c` is a command spawn error, not a failed check).
+
+**`check.passed` / `check.failed`** (`source: command`, `path: null`):
+
+```json
+{"check_id": "<32 hex>", "command_id": "<the command's command_id>", "kind": "test",
+ "name": "pytest", "classification": "automatic", "result": "failed",
+ "reason": "nonzero_exit", "exit_code": 1, "duration_ms": 1234}
+```
+
+`exit_code` and `duration_ms` are copied from `command.finished` (`exit_code: null` for
+signals, spawn errors and interrupts before the spawn). Summaries: `Test passed: pytest`,
+`Test failed: pytest (exit 1)`, `Build failed: npm build (signal SIGKILL)`,
+`Lint failed: ruff (interrupted, exit 0)`, `Typecheck failed: mypy (could not start)`.
+
+`command_id` answers "which command produced this check?"; `check_id` identifies the check
+itself. Concurrent wrapped commands each pair their own IDs, and their check events come
+after their own `command.finished`.
 
 #### Cross-platform file lock
 
@@ -684,7 +763,7 @@ src/agentbodycam/
   cli.py           argparse CLI (help, version, doctor, session create/list/show/active,
                    record, run)
   core/            application logic (doctor, filelock, store, active, ignore, scanner,
-                   git_observer, recorder, command, redact; later: forensics)
+                   git_observer, recorder, command, redact, checks; later: forensics)
   models/          typed dataclasses shared across layers (environment, events, session)
   utils/           small dependency-free helpers (today: Git detection and the bounded,
                    shell-free read-only Git command runner)

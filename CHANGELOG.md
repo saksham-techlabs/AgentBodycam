@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Deterministic check result recording: `agentbodycam run --check test|build|lint|typecheck
+  -- <command>` (authoritative), plus conservative automatic recognition of a fixed
+  whitelist (`pytest`, `python -m pytest|unittest|build|mypy|pyright|ruff check`,
+  `cargo|go|dotnet test|build`, `ruff check`, `eslint`, `mypy`, `pyright`,
+  `tsc --noEmit`, and the `test`/`build`/`lint`/`typecheck` scripts of npm, pnpm and
+  yarn), also behind an explicit `cmd /c` or `sh -c` wrapper with plain words only.
+  Unrecognised commands stay plain commands. After `command.finished` is recorded,
+  `check.passed` (exited with status 0) or `check.failed` (`nonzero_exit`, `signaled`,
+  `interrupted`, `spawn_error`) is appended with a random `check_id` and the command's
+  `command_id`, through the same live-recording guard; never after `session.stopped`.
+  Check names are generated from known tools, never from arguments. Output is not read
+  and no cause is inferred. Classification is a pure module (`core/checks.py`) and never
+  changes the argv that is run.
+- `looks_secret()` in `core/redact.py`.
 - Wrapped command recording: `agentbodycam run [--project DIR] -- <command> [args...]`
   attaches to the project's active recording (bounded 1 s retry while a recorder is
   publishing its metadata; stale metadata is never used), appends `command.started`, runs

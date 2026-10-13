@@ -284,6 +284,13 @@ def redact_command(
     )
 
 
+def looks_secret(text: str) -> bool:
+    """Would redaction hide any part of ``text`` (a token, credential or key)?"""
+    if _PRIVATE_KEY.search(text):
+        return True
+    return _Redactor(Path(), None).scrub(text) != text
+
+
 def _executable_name(argv0: str, redactor: _Redactor) -> str:
     """The program's file name only; its directory is never recorded."""
     name = re.split(r"[\\/]", argv0)[-1] or argv0

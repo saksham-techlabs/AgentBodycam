@@ -21,6 +21,7 @@ from agentbodycam.models.events import Event, EventType
 ENV = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
 SESSION_LINE = re.compile(r"^Session: (\S+)$", re.MULTILINE)
 COMMAND_TYPES = {EventType.COMMAND_STARTED, EventType.COMMAND_FINISHED}
+CHECK_TYPES = {EventType.CHECK_PASSED, EventType.CHECK_FAILED}
 
 
 def cli(*args: str) -> list[str]:

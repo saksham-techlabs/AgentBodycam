@@ -6,10 +6,15 @@
 >
 > AgentBodycam can record file-system changes and read-only Git state changes in a project
 > (`agentbodycam record`), plus commands you explicitly launch through
-> `agentbodycam run -- <command>`. It does not observe arbitrary terminal commands, does
-> not classify test/build results, does not integrate with any specific agent, and does not
-> analyse sessions, replay them, export them or provide a UI. It has no AI features. Expect
-> breaking changes.
+> `agentbodycam run -- <command>` and whether those that are tests, builds, lints or type
+> checks passed or failed. It does not observe arbitrary terminal commands, does not
+> integrate with any specific agent, and does not analyse sessions, replay them, export
+> them or provide a UI. It has no AI features. Expect breaking changes.
+>
+> Implemented: file recording, read-only Git recording, wrapped command recording,
+> deterministic check outcome recording.
+> Still not implemented: forensic analysis, replay API, UI, export, agent adapters, AI
+> analysis.
 
 ## What is this?
 
@@ -44,7 +49,7 @@ It is designed to be:
 | Universal recorder: Git state (`record`) | Implemented (read-only Git commands) |
 | One active recording per project (OS-backed lease) | Implemented |
 | Wrapped command recording (`run -- <command>`) | Implemented (explicitly wrapped commands only) |
-| Automatic test/build/lint result classification | Not started |
+| Check outcome recording (`run --check KIND`, `check.passed` / `check.failed`) | Implemented (explicit, plus conservative automatic recognition) |
 | Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
 | Local forensics engine | Not started |
 | Replay UI | Not started |
@@ -146,8 +151,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: test/build result classification, agent integrations, forensics, replay/UI,
-  export or AI.
+- Not yet: agent integrations, forensics, replay/UI, export or AI.
 
 ### Recording commands you run
 
@@ -203,8 +207,54 @@ session.stopped
 - Ctrl+C reaches the command as usual; `run` waits for the command to exit, records how it
   ended (`outcome: interrupted`), then exits with its status, so it never leaves the
   command running on its own.
-- Test and build results are **not** classified yet: `python -m pytest` is recorded as a
-  command with an exit code, not as a passed or failed check.
+
+### Recording check results (tests, builds, lints, type checks)
+
+A wrapped command that is a **check** also gets a `check.passed` or `check.failed` event,
+right after its `command.finished`:
+
+```bash
+agentbodycam run --check test -- python -m pytest
+agentbodycam run --check build -- python -m build
+agentbodycam run --check lint -- python -m ruff check .
+agentbodycam run --check typecheck -- python -m mypy .
+agentbodycam run --check test -- cmd /c npm test        # Windows
+
+agentbodycam run -- python -m pytest                   # recognised automatically
+```
+
+```text
+command.started    Command started: python -m pytest
+command.finished   Command finished: python -m pytest (exit 1)
+check.failed       Test failed: pytest (exit 1)
+file.modified      app.py
+command.started    Command started: python -m pytest
+command.finished   Command finished: python -m pytest (exit 0)
+check.passed       Test passed: pytest
+```
+
+- `--check test|build|lint|typecheck` is authoritative. **Use it when certainty matters.**
+- Without `--check`, only a short whitelist of unmistakable commands is recognised:
+  `pytest`, `python -m pytest`, `python -m unittest`, `cargo test`, `go test`,
+  `dotnet test`; `python -m build`, `cargo build`, `go build`, `dotnet build`;
+  `ruff check`, `python -m ruff check`, `eslint`; `mypy`, `python -m mypy`, `pyright`,
+  `tsc --noEmit`; and the `test`, `build`, `lint` and `typecheck` scripts of `npm`,
+  `pnpm` and `yarn` (`npm test`, `npm run build`, `pnpm lint`, `yarn run typecheck`, ...),
+  also behind an explicit `cmd /c ...` or `sh -c "..."`. See
+  [the exact rules](docs/architecture.md#check-results).
+- **Anything else stays a plain command**: `python script.py`, `make`, `bash build.sh`,
+  `npm run custom` and so on are never guessed.
+- A check **passes only if the process exited by itself with status 0.** A non-zero exit,
+  a signal, an interrupt (Ctrl+C) or a failure to start an explicit `--check` command is a
+  failure, and the event says which (`reason`).
+- Output is **not analysed** (and not stored): no test names, assertion messages or
+  compiler errors. The result comes from the exit status only.
+- **No cause is inferred.** A `file.modified` between a failing and a passing check is just
+  two observations in order; AgentBodycam never claims the edit fixed anything. Each run is
+  an independent check with its own `check_id`; failure-then-success patterns are left to
+  the future forensics engine.
+- Check names are generated from the recognised tool (`pytest`, `npm build`, `ruff`), never
+  from your arguments, so secrets in arguments never appear in them.
 
 ### Session store
 

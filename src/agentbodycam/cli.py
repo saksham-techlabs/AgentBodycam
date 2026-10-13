@@ -2,9 +2,9 @@
 
 Implemented: environment check, session-store commands (including the read-only
 ``session active``), the polling recorder (file changes and read-only Git state; one
-recorder per project) and explicit wrapped-command capture (``run -- <command>``).
-Test/build classification, forensics and replay are not implemented yet and are
-intentionally absent from the CLI.
+recorder per project), explicit wrapped-command capture (``run -- <command>``) and
+deterministic check results for wrapped commands (``run --check KIND -- <command>``).
+Forensics and replay are not implemented yet and are intentionally absent from the CLI.
 """
 
 from __future__ import annotations
@@ -25,6 +25,7 @@ from agentbodycam.core.active import (
     RecordingInProgressError,
     get_active_session,
 )
+from agentbodycam.core.checks import CheckKind
 from agentbodycam.core.command import run_wrapped_command
 from agentbodycam.core.doctor import collect_environment, format_report
 from agentbodycam.core.recorder import (
@@ -50,7 +51,8 @@ _EVENT_LABELS = {
     EventType.GIT_SNAPSHOT: "GIT",
     EventType.ERROR_OBSERVED: "ERROR",
 }
-RUN_USAGE = f"{PROG} run [-h] [--project DIR] -- <command> [args...]"
+CHECK_KINDS = [kind.value for kind in CheckKind]
+RUN_USAGE = f"{PROG} run [-h] [--project DIR] [--check KIND] -- <command> [args...]"
 _GIT_NOTES = {
     GitStatus.NOT_A_REPOSITORY: "Git: not a Git repository (Git state not recorded)",
     GitStatus.GIT_NOT_FOUND: "Git: executable not found (Git state not recorded)",
@@ -76,8 +78,9 @@ def build_parser() -> argparse.ArgumentParser:
         prog=PROG,
         description=(
             f"{TAGLINE}\n\nEarly development: file-system and read-only Git state recording, "
-            "plus commands explicitly launched with `agentbodycam run -- ...`. Other terminal "
-            "commands and agent internals are not captured."
+            "plus commands explicitly launched with `agentbodycam run -- ...` and their "
+            "test/build/lint/typecheck results. Other terminal commands and agent internals "
+            "are not captured."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -159,11 +162,11 @@ def build_parser() -> argparse.ArgumentParser:
         help="Stop automatically after this many seconds (default: until Ctrl+C).",
     )
 
-    subparsers.add_parser(
+    run = subparsers.add_parser(
         "run",
         parents=[project],
         usage=RUN_USAGE,
-        help="Run a command and record it in the active recording.",
+        help="Run a command and record it (and its check result) in the active recording.",
         description=(
             "Run <command> [args...] and record command.started / command.finished in the "
             "project's active recording (start one with `agentbodycam record`). Without an "
@@ -173,12 +176,34 @@ def build_parser() -> argparse.ArgumentParser:
             "it explicitly (e.g. `cmd /c ...` or `sh -c ...`). stdin, stdout, stderr and the "
             "environment are inherited and never recorded; arguments are recorded with "
             "secrets redacted.\n\n"
+            "Checks: a command classified as a test, build, lint or typecheck also gets a "
+            "check.passed or check.failed event after command.finished. It passes only if it "
+            "exited by itself with status 0; output is never analysed and no cause is "
+            "inferred. Use --check when certainty matters. Without it, only a short list of "
+            "unmistakable commands is recognised (e.g. `python -m pytest`, `cargo test`, "
+            "`npm run build`, `ruff check`, `mypy`, `tsc --noEmit`); anything else stays a "
+            "plain command.\n\n"
+            "Examples:\n"
+            f"  {PROG} run --check test -- python -m pytest\n"
+            f"  {PROG} run --check build -- cmd /c npm run build\n"
+            f"  {PROG} run -- python -m pytest      (recognised automatically as a test)\n"
+            f"  {PROG} run -- python script.py      (plain command, no check)\n\n"
             "Exit status: the command's own exit status (128+N if a POSIX signal N ended it). "
             "AgentBodycam's own failures: 125 (no active recording or other setup error), "
             "126 (cannot execute), 127 (executable not found), 130 (interrupted before the "
             "command started)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    run.add_argument(
+        "--check",
+        choices=CHECK_KINDS,
+        default=None,
+        metavar="KIND",
+        help=(
+            f"Record the command's result as a check of this kind ({', '.join(CHECK_KINDS)}). "
+            "Overrides automatic classification."
+        ),
     )
     return parser
 
@@ -421,7 +446,8 @@ def main(
         if not command_argv:
             parser.error(f"run needs a command after `--`\nusage: {RUN_USAGE}")
         project: Path = args.project if args.project is not None else Path.cwd()
-        return run_wrapped_command(project, command_argv, err=err_stream)
+        check = None if args.check is None else CheckKind(args.check)
+        return run_wrapped_command(project, command_argv, err=err_stream, check=check)
     if args.command == "doctor":
         return _run_doctor(stream)
     if args.command == "session":

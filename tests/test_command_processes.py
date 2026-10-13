@@ -16,6 +16,7 @@ from agentbodycam.core.recorder import Recorder
 from agentbodycam.core.store import EventStore
 from agentbodycam.models.events import Event, EventType
 from command_helpers import (
+    CHECK_TYPES,
     ENV,
     RecorderProcess,
     cli,
@@ -36,9 +37,11 @@ def wrapper(
     cwd: Path | None = None,
     creationflags: int = 0,
     start_new_session: bool = False,
+    check: str | None = None,
 ) -> subprocess.Popen[str]:
+    options = [] if check is None else ["--check", check]
     return subprocess.Popen(  # noqa: S603 - fixed interpreter and test-controlled arguments
-        cli("run", "--project", str(project), "--", *argv),
+        cli("run", "--project", str(project), *options, "--", *argv),
         stderr=subprocess.PIPE,
         text=True,
         encoding="utf-8",
@@ -136,6 +139,102 @@ def test_concurrent_wrapped_commands(recorder_process: RecorderProcess) -> None:
         assert start.sequence < ends[command_id].sequence
     exit_codes = sorted(e.payload["exit_code"] for e in ends.values())  # type: ignore[type-var]
     assert exit_codes == [10 + i for i in range(count)]
+
+
+def test_end_to_end_failing_then_passing_check(recorder_process: RecorderProcess) -> None:
+    """record -> failing pytest -> file edit -> passing pytest -> stop, all real processes."""
+    project = recorder_process.project
+    sid = recorder_process.session_id
+    store = EventStore(project)
+    write(project / "test_app.py", "from app_value import VALUE\n\ndef test_value():\n")
+    with (project / "test_app.py").open("a", encoding="utf-8") as handle:
+        handle.write("    assert VALUE == 2\n")
+    write(project / "app_value.py", "VALUE = 1\n")
+    pytest_argv = [sys.executable, "-B", "-m", "pytest", "-q", "-p", "no:cacheprovider"]
+
+    failing = wrapper(project, *pytest_argv, cwd=project)
+    _, err = failing.communicate(timeout=120)
+    assert failing.returncode == 1, err
+    write(project / "app_value.py", "VALUE = 2\n")
+    wait_until(
+        lambda: any(
+            e.type is EventType.FILE_MODIFIED and e.path == "app_value.py"
+            for e in store.read_events(sid)
+        ),
+        what="file.modified app_value.py",
+    )
+    passing = wrapper(project, *pytest_argv, cwd=project)
+    _, err = passing.communicate(timeout=120)
+    assert passing.returncode == 0, err
+    recorder_process.stop()
+
+    events = store.read_events(sid)
+    relevant = [
+        (e.type, e.path)
+        for e in events
+        if e.type in CHECK_TYPES
+        or e.type in (EventType.COMMAND_STARTED, EventType.COMMAND_FINISHED)
+        or (e.type is EventType.FILE_MODIFIED and e.path == "app_value.py")
+        or e.type in (EventType.SESSION_STARTED, EventType.SESSION_STOPPED)
+    ]
+    assert relevant == [
+        (EventType.SESSION_STARTED, None),
+        (EventType.COMMAND_STARTED, None),
+        (EventType.COMMAND_FINISHED, None),
+        (EventType.CHECK_FAILED, None),
+        (EventType.FILE_MODIFIED, "app_value.py"),
+        (EventType.COMMAND_STARTED, None),
+        (EventType.COMMAND_FINISHED, None),
+        (EventType.CHECK_PASSED, None),
+        (EventType.SESSION_STOPPED, None),
+    ]
+    failed, passed = [e for e in events if e.type in CHECK_TYPES]
+    assert failed.summary == "Test failed: pytest (exit 1)"
+    assert passed.summary == "Test passed: pytest"
+    for check in (failed, passed):
+        assert check.payload["classification"] == "automatic"
+        assert check.payload["kind"] == "test"
+    # Observed outcomes only: nothing links the edit to the result.
+    assert "app_value" not in passed.to_json_line()
+
+
+def test_concurrent_checks_pair_with_their_commands(recorder_process: RecorderProcess) -> None:
+    project = recorder_process.project
+    sid = recorder_process.session_id
+    store = EventStore(project)
+    count = 6
+    kinds = ["test", "build", "lint", "typecheck", "test", "build"]
+    body = "import random,sys,time\ntime.sleep(random.random() * 0.3)\nsys.exit(int(sys.argv[1]))\n"
+    # Even indices pass, odd ones fail with a distinct status.
+    statuses = [0 if i % 2 == 0 else 20 + i for i in range(count)]
+    procs = [
+        wrapper(project, *py(body, str(statuses[i])), cwd=project, check=kinds[i])
+        for i in range(count)
+    ]
+    for proc, status in zip(procs, statuses, strict=True):
+        _, err = proc.communicate(timeout=120)
+        assert proc.returncode == status
+        assert "warning" not in err and "error" not in err, err
+    recorder_process.stop()
+
+    events = store.read_events(sid)  # strict parse: contiguous, unique, valid
+    assert events[-1].type is EventType.SESSION_STOPPED
+    finished = {e.payload["command_id"]: e for e in events if e.type is EventType.COMMAND_FINISHED}
+    checks = [e for e in events if e.type in CHECK_TYPES]
+    assert len(finished) == len(checks) == count
+    assert len({c.payload["check_id"] for c in checks}) == count
+    assert {c.payload["command_id"] for c in checks} == finished.keys()
+    seen = []
+    for check in checks:
+        end = finished[check.payload["command_id"]]
+        assert end.sequence < check.sequence
+        assert check.payload["exit_code"] == end.payload["exit_code"]
+        assert check.payload["duration_ms"] == end.payload["duration_ms"]
+        exit_code = end.payload["exit_code"]
+        expected = EventType.CHECK_PASSED if exit_code == 0 else EventType.CHECK_FAILED
+        assert check.type is expected
+        seen.append((check.payload["kind"], exit_code))
+    assert sorted(seen, key=str) == sorted(zip(kinds, statuses, strict=True), key=str)
 
 
 def test_recorder_process_ending_mid_command(recorder_process: RecorderProcess) -> None:
@@ -261,6 +360,51 @@ def test_child_that_handles_the_interrupt_keeps_its_exit_code(
     _, finished = command_events(live.store, live.session.session_id)
     assert finished.payload["outcome"] == "interrupted"
     assert finished.payload["exit_code"] == 0
+
+
+def test_interrupted_check_fails_even_with_exit_zero(
+    live: Recorder, project: Path, tmp_path: Path
+) -> None:
+    ready = tmp_path / "ready"
+    if WINDOWS:
+        proc = wrapper(
+            project,
+            *py(CHILD_HANDLES_INTERRUPT, str(ready)),
+            creationflags=new_group_flags(),
+            check="test",
+        )
+    else:
+        proc = wrapper(
+            project,
+            *py(CHILD_HANDLES_INTERRUPT, str(ready)),
+            start_new_session=True,
+            check="test",
+        )
+    wait_until(ready.exists, what="child start")
+    _interrupt_wrapper(proc)
+    proc.communicate(timeout=60)
+    assert proc.returncode == 0
+    events = live.store.read_events(live.session.session_id)
+    finished = next(e for e in events if e.type is EventType.COMMAND_FINISHED)
+    [check] = [e for e in events if e.type in CHECK_TYPES]
+    assert check.sequence > finished.sequence
+    assert check.type is EventType.CHECK_FAILED
+    assert check.payload["reason"] == "interrupted"
+    assert check.payload["exit_code"] == 0
+    assert check.summary == "Test failed: python (interrupted, exit 0)"
+
+
+@pytest.mark.skipif(WINDOWS, reason="POSIX signals")
+def test_check_killed_by_a_signal_fails(live: Recorder, project: Path) -> None:
+    code = "import os,signal; os.kill(os.getpid(), signal.SIGKILL)"
+    proc = wrapper(project, *py(code), check="test")
+    proc.communicate(timeout=60)
+    events = live.store.read_events(live.session.session_id)
+    [check] = [e for e in events if e.type in CHECK_TYPES]
+    assert check.type is EventType.CHECK_FAILED
+    assert check.payload["reason"] == "signaled"
+    assert check.payload["exit_code"] is None
+    assert check.summary == "Test failed: python (signal SIGKILL)"
 
 
 @pytest.mark.skipif(WINDOWS, reason="SIGTERM cannot be delivered to a Windows process")
