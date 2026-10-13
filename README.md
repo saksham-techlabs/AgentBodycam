@@ -4,9 +4,10 @@
 
 > **EARLY DEVELOPMENT / NOT READY FOR PRODUCTION**
 >
-> AgentBodycam can record file-system changes in a project (`agentbodycam record`).
-> It does not yet monitor Git, capture commands, integrate with any specific agent, analyse
-> sessions or provide a UI. Expect breaking changes.
+> AgentBodycam can record file-system changes and read-only Git state changes in a project
+> (`agentbodycam record`). It does not yet capture commands, tests or builds, integrate with
+> any specific agent, analyse sessions, replay them, export them or provide a UI. It has no
+> AI features. Expect breaking changes.
 
 ## What is this?
 
@@ -38,8 +39,8 @@ It is designed to be:
 | Event model + local append-only event store | Implemented |
 | `session create` / `list` / `show` | Implemented |
 | Universal recorder: file changes (`record`) | Implemented (polling, standard library only) |
-| Universal recorder: Git monitoring | Not started |
-| Universal recorder: command/test capture | Not started |
+| Universal recorder: Git state (`record`) | Implemented (read-only Git commands) |
+| Universal recorder: command/test/build capture | Not started |
 | Local forensics engine | Not started |
 | Replay UI | Not started |
 | Share/export | Not started |
@@ -54,7 +55,8 @@ See [docs/product-scope.md](docs/product-scope.md) and
 ## Requirements
 
 - Python 3.11 or newer
-- Git (optional today; `doctor` reports whether it is available)
+- Git (optional; needed only for Git state recording. `doctor` reports whether it is
+  available)
 - Windows, Linux or macOS
 
 ## Install (from source, for development)
@@ -80,28 +82,35 @@ python -m agentbodycam doctor
 `doctor` prints your Python version, operating system, current directory and whether Git
 is available. It does not change anything on your system.
 
-### Recording file changes
+### Recording file and Git changes
 
 Run this in your project, then work (or let your coding agent work) as usual:
 
 ```text
 $ agentbodycam record
 AgentBodycam recording
-Session: 20261013T214353Z-b74908602141a3c0
+Session: 20261013T220059Z-509d0c620114df53
 Project: C:\Users\me\my project
 
-Baseline snapshot: 2 files
-Watching for file changes (polling every 0.5s)...
+Baseline snapshot: 1 file
+  03:31:00  GIT       Git repository: on branch main at ff4d448, working tree clean
+Watching for file and Git changes (polling every 0.5s)...
 Press Ctrl+C to stop.
 
-  03:13:55  CREATED   src/new.py
-  03:13:55  MODIFIED  src/app.py
-  03:13:56  DELETED   docs/old.md
+  03:31:02  MODIFIED  app.py
+  03:31:04  GIT       Working tree became dirty
+  03:31:06  GIT       Git status changed (1 staged, 0 unstaged, 0 untracked)
+  03:31:10  GIT       HEAD changed ff4d448 -> 010683c; working tree became clean
+  03:31:12  GIT       Branch changed main -> feature/demo
 
 Recording stopped.
-File events recorded: 3 (1 created, 1 modified, 1 deleted)
-Session: 20261013T214353Z-b74908602141a3c0
+File events recorded: 1 (0 created, 1 modified, 0 deleted)
+Git snapshots recorded: 5
+Session: 20261013T220059Z-509d0c620114df53
 ```
+
+Outside a Git repository (or without Git installed) file recording works exactly the same
+and the header says `Git: not a Git repository (Git state not recorded)`.
 
 ```bash
 agentbodycam record --project PATH    # record another directory
@@ -121,7 +130,13 @@ What this is, and is not:
 - `.git/`, `.agentbodycam/`, virtualenvs, `node_modules/`, caches and likely secret files
   (`.env`, `.env.*`, `*.pem`, `*.key`, ...) are never recorded. Symlinks and junctions are
   never followed. See [the exact ignore policy](docs/architecture.md#31-universal-recorder).
-- Not yet: Git monitoring, command/test capture, agent integrations, analysis, replay or UI.
+- In a Git repository it also records a `git.snapshot` event whenever the observable Git
+  state changes (branch, HEAD commit, detached HEAD, upstream ahead/behind, staged /
+  unstaged / untracked / conflicted paths, clean or dirty). Git is polled about every 2
+  seconds with read-only commands only; AgentBodycam never commits, checks out, resets,
+  stashes, fetches or pushes. It stores no diffs, no commit bodies, no author emails and no
+  remote URLs, and it never says *who* made a Git change.
+- Not yet: command/test/build capture, agent integrations, forensics, replay/UI, export or AI.
 
 ### Session store
 

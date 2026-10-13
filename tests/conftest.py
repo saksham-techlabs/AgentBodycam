@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
@@ -28,6 +29,16 @@ class FakeMonotonic:
     def __call__(self) -> int:
         self.value += 1_000
         return self.value
+
+
+@pytest.fixture(autouse=True)
+def isolated_git(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Git in tests never sees the user's config or a repository enclosing ``tmp_path``."""
+    monkeypatch.setenv("GIT_CEILING_DIRECTORIES", str(tmp_path))
+    monkeypatch.setenv("GIT_CONFIG_GLOBAL", os.devnull)
+    monkeypatch.setenv("GIT_CONFIG_NOSYSTEM", "1")
+    for name in ("GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE"):
+        monkeypatch.delenv(name, raising=False)
 
 
 @pytest.fixture

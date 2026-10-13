@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Read-only Git evidence recording in `agentbodycam record`: a `git.snapshot` event is
+  appended after the session starts and whenever the observable Git state changes (branch,
+  HEAD commit, detached/unborn HEAD, upstream ahead/behind from local refs, staged /
+  unstaged / untracked / conflicted paths, clean/dirty). HEAD moves record the previous and
+  new SHA, their relation and the subjects of new commits. Uses only `rev-parse`,
+  `status --porcelain=v2 -z`, `merge-base --is-ancestor` and `log`, without a shell, with
+  timeouts, output caps and `GIT_OPTIONAL_LOCKS=0`; Git is polled every 2 s. Stores no
+  diffs, commit bodies, author emails, remote URLs or credentials; sensitive paths are only
+  counted. Non-Git projects, a missing Git executable and Git failures never stop file
+  recording; failures become de-duplicated `error.observed` events.
 - Universal file recorder: `agentbodycam record [--project DIR] [--interval S]
   [--duration S]`. Creates a new session, marks it `recording`, records `session.started`,
   takes a baseline snapshot, then polls (standard library only) and records `file.created`,

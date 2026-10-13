@@ -3,10 +3,10 @@
 > Status: **design document**. Most of what is described here is not implemented yet.
 > Implemented today: the CLI foundation (`--help`, `--version`, `doctor`), the typed
 > event/session model and the local append-only event store (section 3.2), managed with
-> `agentbodycam session create|list|show`, and the file-system part of the universal
-> recorder (`agentbodycam record`, section 3.1). Git monitoring, command capture, adapters,
-> forensics, replay, UI, export and AI are not implemented. This document describes the
-> intended direction so future work stays coherent.
+> `agentbodycam session create|list|show`, and the file-system and read-only Git state parts
+> of the universal recorder (`agentbodycam record`, section 3.1). Command/test/build
+> capture, adapters, forensics, replay, UI, export and AI are not implemented. This document
+> describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
 
@@ -86,12 +86,13 @@ Rules that follow from this:
 
 Agent-agnostic. Works with any coding agent because it watches the **project**, not the agent.
 
-**Implemented:** session lifecycle and file created / modified / deleted observation
-(code: `core/recorder.py`, `core/scanner.py`, `core/ignore.py`; CLI: `agentbodycam record`).
+**Implemented:** session lifecycle, file created / modified / deleted observation, and
+read-only Git state snapshots (code: `core/recorder.py`, `core/scanner.py`,
+`core/ignore.py`, `core/git_observer.py`, `utils/git.py`; CLI: `agentbodycam record`).
 
 **Planned, not implemented:**
 
-- Git state: HEAD, branch, staged/unstaged diffs, commits made during the session.
+- Git diffs (stored as content-addressed blobs, not inline in events).
 - Commands and processes **where observable** — for example commands launched through an
   AgentBodycam wrapper (`agentbodycam run -- pytest`). We will not claim to see processes
   the recorder cannot actually observe.
@@ -108,11 +109,18 @@ Agent-agnostic. Works with any coding agent because it watches the **project**, 
 3. `session.started` is appended (payload: recorder kind, interval, hash limit, the exact
    ignore policy in force).
 4. A **baseline snapshot** is taken. Files already present produce no events.
-5. The project is polled every `interval` seconds (default 0.5). Each poll is a full
-   snapshot diffed against the previous one; one event is appended per change.
-6. On stop, a final scan is made (for requested stops), then `session.stopped` is appended
-   (payload: reason, scan count, baseline size, per-kind event counts, errors observed),
-   then `EventStore.mark_stopped()` sets status `stopped` and `ended_at`.
+5. Git is observed once; if the project is in a Git repository the first `git.snapshot` is
+   appended (see "Git state" below).
+6. The project is polled every `interval` seconds (default 0.5). Each poll is a full
+   snapshot diffed against the previous one; one event is appended per change. Git is
+   looked at in the same poll when at least `git_interval` (2 s) has passed since the last
+   Git observation.
+7. On stop, a final scan is made (for requested stops and duration expiry; it always
+   includes Git), then `session.stopped` is appended (payload: reason, scan count, baseline
+   size, per-kind event counts, errors observed, `git_snapshots`, `git_status`), then
+   `EventStore.mark_stopped()` sets status `stopped` and `ended_at`.
+
+`session.started` also records `git: {enabled, executable_found, interval_seconds}`.
 
 Stop reasons: `requested` (Ctrl+C, SIGTERM or Ctrl+Break, handled as a flag so a scan or
 append is never interrupted half-way), `duration`, `interrupted` (a second Ctrl+C forces
@@ -203,6 +211,99 @@ A `.git` *file* (worktrees/submodules) is ignored as well.
 - A directory that cannot be listed produces one `error.observed`, and the files known
   under it are kept (not reported as deleted).
 - One bad file never stops the recording.
+
+#### Git state
+
+Code: `core/git_observer.py` (observation, parsing, summaries), `utils/git.py` (runner).
+
+**Commands.** Only these read-only commands are ever run, each without a shell, with a
+fixed argument list, a timeout (15 s for `status`, 5 s otherwise) and an output cap (8 MiB
+for `status`, 256 KiB otherwise):
+
+| When | Command |
+|---|---|
+| Repository discovery (first time, or after it was unavailable) | `git rev-parse --show-toplevel --absolute-git-dir --git-common-dir` and `git rev-parse --show-prefix` |
+| Every Git poll | `git status --porcelain=v2 --branch -z --untracked-files=all --ignore-submodules=all --renames -- . ":(exclude).agentbodycam"` |
+| Only when HEAD moved | `git merge-base --is-ancestor A B` (once or twice) and `git log -z --no-show-signature --format=%H%x1f%s --max-count=21 NEW [^OLD] --` |
+
+Every command gets `-c core.fsmonitor=false -c color.ui=never` and runs with
+`GIT_OPTIONAL_LOCKS=0` (status never takes `index.lock` or rewrites the index),
+`GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, and with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
+`GIT_OBJECT_DIRECTORY`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_TRACE*` and similar
+redirections removed. The executable is the first `git` (`git.exe` on Windows) in an
+**absolute** `PATH` entry; the current directory is never searched. On Windows Git runs
+without a console and in its own process group (POSIX: its own session), so Ctrl+C aimed at
+the recorder never interrupts it; a forced stop kills a running Git command.
+
+Only SHAs validated as 40/64-hex are ever passed as arguments. Remote URLs, `git config`,
+credential helpers and SSH configuration are never queried.
+
+**Recording boundary.** The selected project directory is the boundary. If it is a
+subdirectory of a repository, status is limited to it with a pathspec and paths are stored
+relative to the project (`project_prefix` says where the project sits in the repository);
+branch and HEAD are repository-wide. AgentBodycam's own `.agentbodycam/` is excluded.
+Submodules are not inspected (`--ignore-submodules=all`). Linked worktrees work and are
+reported as `worktree: "linked"`.
+
+**Change detection.** Each poll builds a canonical snapshot payload. A `git.snapshot`
+event is appended only when it differs from the last recorded one, so an unchanged
+repository produces no events. The first snapshot after the session starts is always
+recorded (if the project is in a repository). A project that is not in a repository
+produces no Git events; if it later becomes one (`git init`), a snapshot is recorded, and
+if a recorded repository disappears a `{"repository": false, "reason": ...}` snapshot is
+recorded once.
+
+**Snapshot payload** (`type: git.snapshot`, `source: git`, `path: null`):
+
+```json
+{"repository": true, "root": "C:\\Users\\me\\proj", "project_prefix": "", "worktree": "main",
+ "head": {"commit": "010683c4...", "branch": "main", "detached": false, "unborn": false},
+ "upstream": {"name": "origin/main", "ahead": 1, "behind": 0},
+ "state": "dirty",
+ "counts": {"staged": 1, "unstaged": 1, "untracked": 1, "conflicted": 0},
+ "staged": [{"path": "main.py", "status": "renamed", "original_path": "app.py"}],
+ "unstaged": [{"path": "README.md", "status": "modified"}],
+ "untracked": ["notes.md"],
+ "conflicted": [],
+ "listed_paths_truncated": false, "redacted_paths": 0, "unrepresentable_paths": 0,
+ "changed": ["counts", "staged", "state"], "detected_by": "polling", "scan": 12,
+ "head_change": {"previous": "ff4d448b...", "current": "010683c4...",
+                 "relation": "descendant",
+                 "commits": [{"commit": "010683c4...", "subject": "Bump app output"}],
+                 "commits_truncated": false}}
+```
+
+- `status` values: `modified`, `type_changed`, `added`, `deleted`, `renamed`, `copied`;
+  conflicts: `both_modified`, `both_added`, `both_deleted`, `added_by_us`, `added_by_them`,
+  `deleted_by_us`, `deleted_by_them`. A file can appear in both `staged` and `unstaged`.
+- `upstream` is `null` without an upstream; `ahead`/`behind` come from local refs only
+  (never fetched) and are `null` if the upstream ref is missing.
+- `head.commit` is `null` (`unborn: true`) in a repository with no commits yet.
+- `counts` always cover every path; each list names at most 200 paths
+  (`listed_paths_truncated`), and fewer if the event would exceed ~160 KiB. Paths matching
+  the sensitive-file patterns are counted in `redacted_paths` and never named.
+- `head_change` is present only when HEAD's commit differs from the previous snapshot.
+  `relation` is `descendant` (new HEAD contains the old one, e.g. a commit), `ancestor`
+  (moved back, e.g. a reset), `diverged`, `no_previous_commit`, `unborn` or `unknown`.
+  `commits` lists at most 20 commits reachable from the new HEAD but not the old one,
+  newest first, with their subject line (max 200 characters) only — no body, author, email
+  or patch.
+- `changed` lists the top-level fields that differ from the previous snapshot.
+
+Summaries are factual and never name an actor: `Working tree became dirty`,
+`HEAD changed ff4d448 -> 010683c; working tree became clean`, `Branch changed main ->
+feature`, `HEAD detached at 010683c`, `Git status changed (1 staged, 0 unstaged, 0
+untracked)`.
+
+**Git errors** never stop file recording. A failed command (corrupted repository, dubious
+ownership, permission problem), timeout, oversized output, a Git executable that cannot be
+started, or even an unexpected exception inside the observer becomes one `error.observed`
+event (`source: git`, payload `operation`, `error`, `exit_code`, `errno`, `detail`), the
+previous snapshot is kept, and the same ongoing problem is not reported again until it
+clears. `detail` is the first line of Git's stderr with project/repository paths replaced
+by placeholders and URL credentials redacted. If Git is not installed, nothing is reported
+unless the project contains a `.git` entry (then one `error.observed` with
+`git_not_found`).
 
 ### 3.2 Evidence / Event Store (implemented)
 
@@ -323,10 +424,11 @@ src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
   cli.py           argparse CLI (help, version, doctor, session create/list/show, record)
-  core/            application logic (doctor, store, ignore, scanner, recorder;
-                   later: forensics)
+  core/            application logic (doctor, store, ignore, scanner, git_observer,
+                   recorder; later: forensics)
   models/          typed dataclasses shared across layers (environment, events, session)
-  utils/           small dependency-free helpers (today: read-only git detection)
+  utils/           small dependency-free helpers (today: Git detection and the bounded,
+                   shell-free read-only Git command runner)
 ```
 
 The CLI is built on the standard library `argparse` to keep the runtime dependency

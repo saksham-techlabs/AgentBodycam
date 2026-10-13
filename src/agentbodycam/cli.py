@@ -1,8 +1,8 @@
 """Command-line interface for AgentBodycam.
 
-Implemented: environment check, session-store commands and the polling file recorder.
-Git monitoring, command capture, forensics and replay are not implemented yet and are
-intentionally absent from the CLI.
+Implemented: environment check, session-store commands and the polling recorder (file
+changes and read-only Git state). Command capture, forensics and replay are not
+implemented yet and are intentionally absent from the CLI.
 """
 
 from __future__ import annotations
@@ -20,12 +20,13 @@ from agentbodycam import __version__
 from agentbodycam.core.doctor import collect_environment, format_report
 from agentbodycam.core.recorder import (
     DEFAULT_INTERVAL_SECONDS,
+    GitStatus,
     Recorder,
     StopReason,
     stop_on_signals,
 )
 from agentbodycam.core.store import EventStore, StoreError
-from agentbodycam.models.events import Event, EventType, EventValidationError
+from agentbodycam.models.events import Event, EventSource, EventType, EventValidationError
 from agentbodycam.models.session import InvalidSessionIdError, Session
 
 PROG = "agentbodycam"
@@ -37,7 +38,13 @@ _EVENT_LABELS = {
     EventType.FILE_CREATED: "CREATED",
     EventType.FILE_MODIFIED: "MODIFIED",
     EventType.FILE_DELETED: "DELETED",
+    EventType.GIT_SNAPSHOT: "GIT",
     EventType.ERROR_OBSERVED: "ERROR",
+}
+_GIT_NOTES = {
+    GitStatus.NOT_A_REPOSITORY: "Git: not a Git repository (Git state not recorded)",
+    GitStatus.GIT_NOT_FOUND: "Git: executable not found (Git state not recorded)",
+    GitStatus.ERROR: "Git: repository state could not be read (will keep trying)",
 }
 
 
@@ -58,8 +65,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
         description=(
-            f"{TAGLINE}\n\nEarly development: only file-system recording is implemented "
-            "(no Git, command or agent capture yet)."
+            f"{TAGLINE}\n\nEarly development: only file-system and read-only Git state "
+            "recording are implemented (no command or agent capture yet)."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -108,10 +115,11 @@ def build_parser() -> argparse.ArgumentParser:
     record = subparsers.add_parser(
         "record",
         parents=[project],
-        help="Record file changes in the project into a new session until stopped.",
+        help="Record file and Git state changes in the project into a new session.",
         description=(
             "Start a new session and record observed file creations, modifications and "
-            "deletions in the project (polling; no Git, command or agent capture). "
+            "deletions in the project, plus read-only Git state snapshots when the project "
+            "is in a Git repository (polling; no command or agent capture). "
             "Stop with Ctrl+C."
         ),
     )
@@ -239,9 +247,12 @@ def _print_event(out: TextIO, event: Event) -> None:
     if label is None:
         return
     when = event.timestamp.astimezone().strftime("%H:%M:%S")
-    target = _display(event.path) if event.path is not None else "(path not recorded)"
-    if event.type is EventType.ERROR_OBSERVED:
-        target += f" ({event.payload.get('error')})"
+    if event.source is EventSource.GIT:
+        target = _display(event.summary)
+    else:
+        target = _display(event.path) if event.path is not None else "(path not recorded)"
+        if event.type is EventType.ERROR_OBSERVED:
+            target += f" ({event.payload.get('error')})"
     _write(out, f"  {when}  {label:<9} {target}\n")
 
 
@@ -260,10 +271,15 @@ def _run_record(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         )
         with stop_on_signals(recorder):
             baseline = recorder.take_baseline()
+            _write(out, f"Baseline snapshot: {baseline} file{'' if baseline == 1 else 's'}\n")
+            recorder.observe_git()
+            note = _GIT_NOTES.get(recorder.git_status)
+            if note is not None:
+                _write(out, note + "\n")
+            watched = "file and Git" if recorder.git_status is GitStatus.REPOSITORY else "file"
             _write(
                 out,
-                f"Baseline snapshot: {baseline} file{'' if baseline == 1 else 's'}\n"
-                f"Watching for file changes (polling every {args.interval:g}s)...\n"
+                f"Watching for {watched} changes (polling every {args.interval:g}s)...\n"
                 "Press Ctrl+C to stop.\n\n",
             )
             session = recorder.run(duration=args.duration)
@@ -280,6 +296,8 @@ def _run_record(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
         f"File events recorded: {stats.file_events} "
         f"({stats.created} created, {stats.modified} modified, {stats.deleted} deleted)",
     ]
+    if stats.git_snapshots:
+        lines.append(f"Git snapshots recorded: {stats.git_snapshots}")
     if stats.errors:
         lines.append(f"Errors observed: {stats.errors}")
     lines.append(f"Session: {session.session_id}")
