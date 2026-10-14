@@ -8,6 +8,7 @@ import {
   PLAYBACK_SPEEDS,
   adjacentImportant,
   formatSpeed,
+  isOwnArrowControl,
   isOwnSpaceControl,
   isTextEntry,
   markerPercent,
@@ -178,7 +179,7 @@ function StatusChip({ playback: p }: { playback: Playback }) {
         : p.playing
           ? ["PLAYING", "info"]
           : p.liveEdge
-            ? ["LIVE EDGE", "danger"]
+            ? ["LIVE EDGE", "info"]
             : p.ended
               ? ["END OF RECORDING", "neutral"]
               : ["PAUSED", "muted"];
@@ -397,8 +398,9 @@ function CurrentEvent({
 /**
  * Space: play/pause. Left/Right: previous/next event. Shift+Left/Right: previous/next
  * important event. Ignored while typing, with Ctrl/Alt/Meta, when another handler already
- * used the key (tabs, marker rail, timeline rows) and, for Space, on controls that Space
- * activates themselves (buttons, links, checkboxes).
+ * used the key (tabs, marker rail, timeline rows) and on controls with their own keyboard
+ * handling: any form control or slider-like widget for arrows, plus buttons, links and
+ * checkboxes for Space (the scrubber range input owns both).
  */
 function usePlaybackShortcuts(actions: {
   toggle: () => void;
@@ -418,8 +420,7 @@ function usePlaybackShortcuts(actions: {
         return;
       }
       if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
-      const target = event.target;
-      if (target instanceof HTMLInputElement || target instanceof HTMLSelectElement) return;
+      if (isOwnArrowControl(event.target)) return;
       event.preventDefault();
       const dir = event.key === "ArrowRight" ? 1 : -1;
       if (event.shiftKey) ref.current.important(dir);

@@ -235,9 +235,21 @@ export function isTextEntry(target: EventTarget | null): boolean {
   return target instanceof HTMLInputElement && TEXT_INPUT_TYPES.has(target.type);
 }
 
-/** Controls whose own Space activation must win over the play/pause shortcut. */
+/** Widgets that handle arrow keys themselves (sliders, spin buttons, radio groups, ...). */
+const ARROW_KEY_WIDGETS =
+  "input, select, [role='slider'], [role='spinbutton'], [role='radio'], [role='radiogroup'], [role='listbox'], [role='option'], [role='menu'], [role='menuitem']";
+
+/** Controls that own the Space key (activation or their own keyboard model). */
+const SPACE_KEY_CONTROLS = `${ARROW_KEY_WIDGETS}, button, a[href], summary, [role='button'], [role='tab'], [role='checkbox'], [role='switch']`;
+
+/** Controls whose own Space handling must win over the play/pause shortcut. */
 export function isOwnSpaceControl(target: EventTarget | null): boolean {
   if (!(target instanceof HTMLElement)) return false;
-  if (target instanceof HTMLInputElement) return target.type !== "range";
-  return target.closest("button, a[href], summary, [role='button'], [role='tab'], select") !== null;
+  return target.closest(SPACE_KEY_CONTROLS) !== null;
+}
+
+/** Controls whose own arrow-key handling must win over the step shortcuts. */
+export function isOwnArrowControl(target: EventTarget | null): boolean {
+  if (!(target instanceof HTMLElement)) return false;
+  return target.closest(ARROW_KEY_WIDGETS) !== null;
 }

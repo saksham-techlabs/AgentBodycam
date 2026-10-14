@@ -466,6 +466,28 @@ describe("keyboard shortcuts", () => {
     expect(counter()).toBe("— / 21");
   });
 
+  it("leave Space and arrows to the focused scrubber", async () => {
+    await openTimeline();
+    slider().focus();
+    expect(slider()).toHaveFocus();
+    key(" ", { target: slider() });
+    expect(status()).toBe("PAUSED");
+    expect(counter()).toBe("— / 21");
+    key("ArrowRight", { target: slider() });
+    expect(counter()).toBe("— / 21");
+
+    await scrubTo(4);
+    expect(counter()).toBe("#4 / 21");
+    slider().focus();
+    key(" ", { target: slider() });
+    expect(status()).toBe("PAUSED");
+    expect(counter()).toBe("#4 / 21");
+
+    // Space elsewhere still toggles playback.
+    key(" ");
+    expect(status()).toBe("PLAYING");
+  });
+
   it("move within the marker rail without moving playback", async () => {
     await openTimeline();
     const rail = screen.getByRole("toolbar", { name: "Important event markers" });
@@ -646,6 +668,10 @@ describe("live recordings", () => {
   it("stops at the live edge and plays only recorded events", async () => {
     await playToLiveEdge();
     expect(status()).toBe("LIVE EDGE");
+    // A recording state, not failure evidence: never the danger tone.
+    const chip = screen.getByTestId("playback-status");
+    expect(chip).toHaveClass("tone-info");
+    expect(chip).not.toHaveClass("tone-danger");
     expect(playButton()).toBeDisabled();
     expect(screen.getByTestId("playback-announcement")).toHaveTextContent("At the live edge, event 3 of 3.");
   });

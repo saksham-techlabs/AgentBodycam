@@ -8,6 +8,7 @@ import {
   PLAYBACK_SPEEDS,
   adjacentImportant,
   buildImportant,
+  isOwnArrowControl,
   isOwnSpaceControl,
   isPlaybackSpeed,
   isTextEntry,
@@ -124,7 +125,16 @@ describe("shortcut targets", () => {
     expect(isTextEntry(document.body)).toBe(false);
     expect(isOwnSpaceControl(make("<button></button>"))).toBe(true);
     expect(isOwnSpaceControl(make('<input type="checkbox">'))).toBe(true);
-    expect(isOwnSpaceControl(make('<input type="range">'))).toBe(false);
+    expect(isOwnSpaceControl(make('<input type="range">'))).toBe(true);
+    expect(isOwnSpaceControl(make('<div role="slider" tabindex="0"></div>'))).toBe(true);
+    expect(isOwnSpaceControl(make('<div role="tab"></div>'))).toBe(true);
+    expect(isOwnSpaceControl(make("<div></div>"))).toBe(false);
     expect(isOwnSpaceControl(document.body)).toBe(false);
+    expect(isOwnArrowControl(make('<input type="range">'))).toBe(true);
+    expect(isOwnArrowControl(make('<input type="checkbox">'))).toBe(true);
+    expect(isOwnArrowControl(make("<select></select>"))).toBe(true);
+    expect(isOwnArrowControl(make('<div role="slider" tabindex="0"></div>'))).toBe(true);
+    expect(isOwnArrowControl(make("<button></button>"))).toBe(false);
+    expect(isOwnArrowControl(document.body)).toBe(false);
   });
 });

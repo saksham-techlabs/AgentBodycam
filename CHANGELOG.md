@@ -25,11 +25,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (first failure, recovery marker, important events) pause playback. Live recordings
   stop at the LIVE EDGE; an opt-in "Follow live" (off by default) advances to new events
   only when paused at the edge. Playback pauses while the tab is hidden, on tab change
-  and on session change. Keyboard: Space, ←/→, Shift+←/→ (ignored while typing).
-  Smooth scrolling only without `prefers-reduced-motion`. Engine in
+  and on session change. Keyboard: Space, ←/→, Shift+←/→ (ignored while typing and on
+  controls with their own keyboard handling, such as the scrubber, buttons, tabs and
+  checkboxes). The LIVE EDGE status uses the informational tone; red stays reserved for
+  failure evidence. Smooth scrolling only without `prefers-reduced-motion`. Engine in
   `web/src/hooks/usePlayback.ts`, pure logic in `web/src/lib/playback.ts`, controls in
   `web/src/views/PlaybackBar.tsx`. No backend, API or schema changes; `replay` help and
-  banner text updated to mention playback.
+  banner text updated to mention playback. Still not implemented: final cinematic visual
+  polish, share/export, GIF/video export, file contents/diffs, agent-specific adapters
+  and an optional AI analyst.
 - Replay UI functional replay views (still under development): the session page now has
   Overview, Timeline, Findings, Files and Git / Final State tabs (URL stays
   `/session/<id>`). Paginated forensic timeline over
@@ -45,7 +49,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sessions refresh the report and append timeline pages every 2.5 s. Typed, runtime-
   validated `ForensicReport` and `TimelinePage` models; `report()` and `timeline()` client
   methods. No backend routes or semantics changed; no raw payloads, file contents, diffs
-  or causal wording. Cinematic playback, scrubbing and export are not implemented.
+  or causal wording. At this stage playback and scrubbing were not yet available (added
+  by the playback controls entry above).
 - Replay UI foundation (under development): `agentbodycam replay [--project DIR]
   [--host 127.0.0.1|::1|localhost] [--port N]` serves a React/TypeScript UI (source in
   `web/`, Vite build committed to `src/agentbodycam/ui/static/` and shipped in the wheel;
@@ -61,8 +66,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   (`script-src 'self'`, no `unsafe-inline`/`unsafe-eval`, no remote sources); the API CSP
   is unchanged. The page receives the temporary token from `GET /ui/bootstrap` (custom
   header plus same-origin fetch metadata required; no CORS) and keeps it in memory only;
-  `replay` does not print it. Timeline, scrubbing, detailed views and export are not
-  implemented.
+  `replay` does not print it. At this stage the timeline, detailed views and scrubbing
+  were not yet available (added by the entries above).
 - `hatchling` in the `dev` extra (the tests build and inspect a real wheel).
 - Local, authenticated, read-only Replay API: `agentbodycam replay-api [--project DIR]
   [--host 127.0.0.1|::1|localhost] [--port N]` (standard library `ThreadingHTTPServer`, no
