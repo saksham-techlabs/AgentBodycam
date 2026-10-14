@@ -1,6 +1,6 @@
 import { createElement, type ReactNode } from "react";
 
-import { assertSafeAttr, type SvgNode } from "../lib/svg";
+import { assertSafeAttr, assertSafeTag, type SvgNode } from "../lib/svg";
 
 /** SVG attribute names as React props: `stroke-width` becomes `strokeWidth`. */
 function propName(name: string): string {
@@ -9,6 +9,7 @@ function propName(name: string): string {
 
 function render(node: SvgNode | string, key: number): ReactNode {
   if (typeof node === "string") return node;
+  assertSafeTag(node.tag);
   const props: Record<string, string | number> = { key };
   for (const [name, value] of Object.entries(node.attrs)) {
     assertSafeAttr(name, value);

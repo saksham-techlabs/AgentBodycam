@@ -11,6 +11,8 @@ untouched arguments. The rules prefer hiding too much over leaking a secret:
   strings,
 - absolute paths: inside the project they become project-relative POSIX paths, anywhere
   else ``<external-path>``; the project and home directories are never stored verbatim.
+  Drive and UNC paths count as absolute on every platform, and so do driveless rooted
+  paths with two or more segments on Windows (``/home/me/x``, ``\\Users\\me\\x``).
 
 The result is also bounded in item count, item length and total size.
 """
@@ -85,6 +87,9 @@ _TOKEN_PATTERNS = tuple(
 # '/' and '\' are excluded so ordinary paths are not swallowed.
 _RANDOM_LOOKING = re.compile(r"[A-Za-z0-9_\-+=]{32,}")
 _WINDOWS_ABSOLUTE = re.compile(r"^(?:[A-Za-z]:[\\/]|\\\\|//)")
+# Rooted but driveless on Windows ("\Users\me\x", or "/home/me/x" handed to WSL or Git Bash
+# tools). At least two segments, so switches such as "/c", "/?" or "/p:Name=v" are kept.
+_WINDOWS_ROOTED = re.compile(r"^[\\/][^\\/:\s]+[\\/]")
 
 
 def is_sensitive_name(name: str) -> bool:
@@ -207,10 +212,10 @@ _WINDOWS = sys.platform == "win32"
 
 
 def _looks_absolute(text: str) -> bool:
-    if text.startswith("~"):
+    if text.startswith("~") or _WINDOWS_ABSOLUTE.match(text):
         return True
     if _WINDOWS:
-        return bool(_WINDOWS_ABSOLUTE.match(text))
+        return bool(_WINDOWS_ROOTED.match(text))
     return text.startswith("/")
 
 

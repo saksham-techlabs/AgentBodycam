@@ -353,8 +353,8 @@ class _Handler(BaseHTTPRequestHandler):
         origins = self.headers.get_all("Origin") or []
         if len(origins) > 1 or (origins and origins[0] not in self._config.allowed_origins):
             return _error(403, "origin_not_allowed", "Cross-origin requests are not allowed.")
-        site = (self.headers.get("Sec-Fetch-Site") or "").strip().lower()
-        if site in ("cross-site", "same-site"):
+        sites = [value.strip().lower() for value in self.headers.get_all("Sec-Fetch-Site") or []]
+        if len(sites) > 1 or any(site in ("cross-site", "same-site") for site in sites):
             return _error(403, "origin_not_allowed", "Cross-origin requests are not allowed.")
         return None
 

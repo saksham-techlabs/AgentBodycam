@@ -273,6 +273,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   another process has the file open; active-session discovery treats a transient read
   error as `invalid` instead of raising.
 
+### Security
+
+- Release security and privacy hardening (no new features):
+  - Command redaction: on Windows, driveless rooted paths with two or more segments
+    (`/home/<name>/...`, `\Users\<name>\...`) were stored verbatim, and on Linux/macOS
+    Windows drive and UNC paths were; all of them now become `<external-path>`.
+    Single-segment switches such as `cmd /c` are kept.
+  - Replay server: a repeated `Sec-Fetch-Site` header is refused like a cross-site one.
+  - Replay UI: parallel requests that need a new token after a server restart now share
+    one `/ui/bootstrap` request (exactly one retry per request is unchanged; an abort
+    affects only the request it belongs to).
+  - SVG export: element names are checked against the allowlist at run time as well as
+    by the type system, for both the download and the preview.
+  - Exports (SVG / JSON / WebM): check names are now matched against the exact list of
+    names AgentBodycam generates for recognised tools. Before, any short lowercase word
+    passed, so an explicit `--check` of an unrecognised program exported that program's
+    file name (for example a private script name); such checks are now labelled generically.
+  - `.gitignore` also excludes logs, source maps, local export files and key material.
+  - New regression tests: hostile command lines from `run` to the Replay API, hostile
+    strings through every export, token/storage/DOM checks, error text, static-path
+    tricks, response headers per role, repository hygiene, and documentation / CLI help
+    consistency and wording.
+  - Documentation: `SECURITY.md` now describes the export boundary, the threat model and
+    known limitations; stale status text in `docs/product-scope.md`,
+    `docs/architecture.md` and the CLI help was corrected.
+
 ### Fixed
 
 - Replay UI reliability hardening (no new features; forensic semantics, API and privacy

@@ -414,6 +414,150 @@ describe("timeline", () => {
   });
 });
 
+/** `server.fetch`, but requests matching `hold` wait until the test releases them, in order. */
+function gated(hold: (path: string) => boolean) {
+  const waiting: (() => void)[] = [];
+  const fetch = vi.fn(async (input: string, init: RequestInit) => {
+    if (hold(input)) await new Promise<void>((resolve) => waiting.push(resolve));
+    return server.fetch(input, init);
+  });
+  return {
+    client: new ReplayApiClient(fetch),
+    release: () => waiting.shift()?.(),
+    held: () => waiting.length,
+  };
+}
+
+const settle = () => new Promise((resolve) => setTimeout(resolve, 0));
+const ABORTED = { name: "AbortError" };
+
+describe("concurrent token refresh", () => {
+  it("parallel first requests share one bootstrap", async () => {
+    const gate = gated((p) => p === "/ui/bootstrap");
+    const all = Promise.all([
+      gate.client.sessions(),
+      gate.client.project(),
+      gate.client.session(STOPPED_ID),
+      gate.client.report(STOPPED_ID),
+    ]);
+    await settle();
+    expect(gate.held()).toBe(1);
+    gate.release();
+    await all;
+    expect(countPaths("/ui/bootstrap")).toBe(1);
+    for (const request of server.requests.slice(1)) {
+      expect(request.headers.authorization).toBe(`Bearer ${TOKEN}`);
+    }
+  });
+
+  it("parallel 401s after a restart share one re-bootstrap and retry once each", async () => {
+    await client.sessions();
+    server.token = FRESH;
+    server.bootstrap = { status: 200, body: { api_version: 1, token: FRESH } };
+    await Promise.all([
+      client.sessions(),
+      client.project(),
+      client.report(STOPPED_ID),
+      client.timeline(STOPPED_ID),
+    ]);
+    expect(countPaths("/ui/bootstrap")).toBe(2);
+    expect(countPaths("/api/v1/sessions")).toBe(3);
+    expect(countPaths("/api/v1/project")).toBe(2);
+    expect(countPaths(`/api/v1/sessions/${STOPPED_ID}/report`)).toBe(2);
+    expect(server.requests.at(-1)?.headers.authorization).toBe(`Bearer ${FRESH}`);
+  });
+
+  it("a request rejected after the refresh finished reuses the new token", async () => {
+    let held = false;
+    const gate = gated((p) => p === "/api/v1/project" && !held && (held = true));
+    await gate.client.sessions();
+    server.token = FRESH;
+    server.bootstrap = { status: 200, body: { api_version: 1, token: FRESH } };
+    const project = gate.client.project();
+    await settle();
+    await gate.client.sessions();
+    gate.release();
+    expect((await project).session_count).toBe(server.sessions.length);
+    expect(countPaths("/ui/bootstrap")).toBe(2);
+    expect(countPaths("/api/v1/project")).toBe(2);
+  });
+
+  it("an abort by the bootstrap's starter does not fail the other waiters", async () => {
+    const gate = gated((p) => p === "/ui/bootstrap");
+    const controller = new AbortController();
+    const first = gate.client.sessions(controller.signal);
+    const second = gate.client.project();
+    await settle();
+    controller.abort();
+    await expect(first).rejects.toMatchObject(ABORTED);
+    gate.release();
+    await settle();
+    expect(gate.held()).toBe(1);
+    gate.release();
+    expect((await second).session_count).toBe(server.sessions.length);
+    expect(countPaths("/ui/bootstrap")).toBe(2);
+    expect(countPaths("/api/v1/sessions")).toBe(0);
+  });
+
+  it("a waiter that aborts leaves the shared bootstrap running for the others", async () => {
+    const gate = gated((p) => p === "/ui/bootstrap");
+    const controller = new AbortController();
+    const first = gate.client.sessions();
+    const second = gate.client.project(controller.signal);
+    await settle();
+    controller.abort();
+    await expect(second).rejects.toMatchObject(ABORTED);
+    gate.release();
+    expect((await first).total).toBe(server.sessions.length);
+    expect(countPaths("/ui/bootstrap")).toBe(1);
+    expect(countPaths("/api/v1/project")).toBe(0);
+  });
+
+  it("a refused shared bootstrap fails every waiter and is not remembered", async () => {
+    server.bootstrap = { status: 403, body: { error: { code: "bootstrap_not_allowed", message: "x" } } };
+    const results = await Promise.allSettled([client.sessions(), client.project(), client.report(STOPPED_ID)]);
+    for (const result of results) {
+      expect(result.status).toBe("rejected");
+      expect((result as PromiseRejectedResult).reason).toMatchObject({ kind: "forbidden" });
+    }
+    expect(countPaths("/ui/bootstrap")).toBe(1);
+    server.bootstrap = { status: 200, body: { api_version: 1, token: TOKEN } };
+    await client.sessions();
+    expect(countPaths("/ui/bootstrap")).toBe(2);
+    expect(client.hasAccess).toBe(true);
+  });
+
+  it("parallel requests whose fresh token is rejected too fail after exactly one retry", async () => {
+    server.token = "never-handed-out-by-the-bootstrap-route-xx";
+    const paths = ["/api/v1/sessions", "/api/v1/project", `/api/v1/sessions/${STOPPED_ID}`];
+    const results = await Promise.allSettled([
+      client.sessions(),
+      client.project(),
+      client.session(STOPPED_ID),
+    ]);
+    for (const result of results) {
+      expect((result as PromiseRejectedResult).reason).toMatchObject({ kind: "unauthorized" });
+    }
+    for (const path of paths) expect(countPaths(path)).toBe(2);
+    expect(countPaths("/ui/bootstrap")).toBeLessThanOrEqual(1 + paths.length);
+    expect(client.status).toBe("unauthorized");
+  });
+
+  it("keeps the token out of URLs, storage and the client's own fields while coalescing", async () => {
+    await Promise.all([client.sessions(), client.project()]);
+    server.token = FRESH;
+    server.bootstrap = { status: 200, body: { api_version: 1, token: FRESH } };
+    await Promise.all([client.sessions(), client.project()]);
+    for (const secret of [TOKEN, FRESH]) {
+      for (const request of server.requests) expect(request.path).not.toContain(secret);
+      expect(JSON.stringify(client)).not.toContain(secret);
+      expect(Object.values(client).join(" ")).not.toContain(secret);
+    }
+    expect(localStorage.length + sessionStorage.length).toBe(0);
+    expect(document.cookie).toBe("");
+  });
+});
+
 describe("connection status", () => {
   it("starts connecting and becomes online after a response", async () => {
     const changes: string[] = [];

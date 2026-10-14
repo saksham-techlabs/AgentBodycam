@@ -64,10 +64,15 @@ describe("share model", () => {
   });
 
   it("allowlists check names conservatively", () => {
-    for (const ok of ["pytest", "npm test", "cargo build", "mypy", "go test"]) {
+    for (const ok of ["pytest", "npm test", "cargo build", "mypy", "go test", "pnpm typecheck"]) {
       expect(safeCheckName(ok)).toBe(ok);
     }
     for (const bad of [
+      // Explicit `--check` names taken from a program's file name stay out of exports.
+      "python",
+      "command",
+      "deploy-client-acme",
+      "npm start",
       "src/app.py",
       "C:\\tools\\x",
       "deploy.sh",
@@ -90,10 +95,10 @@ describe("share model", () => {
     const r = richReport(STOPPED_ID);
     if (r.first_observable_failure === null) throw new Error("fixture has a first failure");
     r.first_observable_failure.check_kind = "typecheck";
-    r.first_observable_failure.check_name = "abcdefghij klmnopqrstuvw";
+    r.first_observable_failure.check_name = "pnpm typecheck";
     const label = buildShareModel(r).firstFailure?.label ?? "";
     expect(Array.from(label).length).toBeLessThanOrEqual(MAX_LABEL_CHARS);
-    expect(label.endsWith("…")).toBe(true);
+    expect(label).toBe(bound("Typecheck failed: pnpm typecheck", MAX_LABEL_CHARS));
     for (const t of texts(buildShareCard(buildShareModel(r)))) {
       expect(Array.from(t).length, t).toBeLessThanOrEqual(48);
     }

@@ -1,6 +1,7 @@
 # AgentBodycam Architecture
 
-> Status: **design document**. Most of what is described here is not implemented yet.
+> Status: **design document** for an early-development project that is not ready for
+> production use. Parts of what is described here are not implemented yet.
 > Implemented today: the CLI foundation (`--help`, `--version`, `doctor`), the typed
 > event/session model and the local append-only, process-safe event store (section 3.2),
 > managed with `agentbodycam session create|list|show|active`, the file-system and
@@ -335,7 +336,10 @@ child always receives the original argv):
 - Paths: an absolute path (or `~...`), alone or as the value of `name=`, becomes its
   normalized project-relative POSIX form (`.` for the root) if inside the project, otherwise
   `<external-path>`. The project and home directories embedded elsewhere in an item become
-  `<project>` / `<home>`. `executable` is only the program's file name.
+  `<project>` / `<home>`. `executable` is only the program's file name. Drive paths
+  (`C:\...`) and UNC paths (`\\server\...`) are absolute on every platform; on Windows a
+  driveless rooted path with at least two segments (`/home/me/x`, `\Users\me\x`) is too,
+  while single-segment switches such as `/c` or `/p:Name=value` are kept.
 - Bounds: at most 64 items, 256 characters per item, 4096 characters in total; redaction
   happens before truncation. `argv_redacted`, `argv_truncated` and `argv_paths_rewritten`
   record what happened; `argument_count` is the real number of arguments.

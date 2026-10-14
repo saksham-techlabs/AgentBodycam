@@ -1,7 +1,7 @@
 # Product Scope
 
-> Status: **planning document**. The project is in early development. Nothing listed
-> under v0.1 is implemented yet unless explicitly marked as done.
+> Status: **planning document**. The project is in early development and not ready for
+> production use. "Current state" below lists what exists today; everything else is a goal.
 
 ## One-liner
 
@@ -11,14 +11,26 @@ the session from evidence.
 
 ## Current state (v0.0.1)
 
-Done:
+Done (early development, not production-ready):
 
-- Python package skeleton, CLI entry point.
-- `agentbodycam --help`, `agentbodycam --version`, `agentbodycam doctor` (read-only
-  environment check).
-- Lint, format, type-check and test tooling.
+- CLI foundation: `--help`, `--version`, `doctor` (read-only environment check).
+- Local append-only event store and session management (`session create|list|show|active`).
+- Universal recorder: file changes and read-only Git state (`record`).
+- Explicitly wrapped commands and deterministic check results (`run -- <command>`).
+- Deterministic local forensics (`analyze`): timeline, first observable failure, observed
+  recoveries, failures unresolved in the recording, last recorded state.
+- Local, authenticated, read-only Replay API (`replay-api`).
+- Local Replay UI (`replay`, under development): dashboard, timeline, playback and
+  scrubber, findings, files, last recorded Git / final state.
+- Local privacy-safe export generated in the browser: SVG share card, JSON summary and a
+  generated WebM replay clip (an animation of recorded evidence, not a screen capture).
 
-Not done: everything else below.
+Not done:
+
+- Git diffs and file contents (only paths, sizes, hashes and Git status are recorded).
+- GIF and MP4 export, hosted sharing.
+- Agent-specific adapters.
+- Optional AI analyst.
 
 ## v0.1 target boundaries
 
@@ -55,7 +67,7 @@ It must send **no telemetry**.
 - AI-generated analysis of any kind (planned later as an optional, opt-in feature
   with local or bring-your-own-key models).
 - Hosted sharing service.
-- Video/GIF generation (planned later in the share/export pipeline).
+- GIF/MP4 generation and hosted sharing (a local, generated WebM replay clip exists).
 - Deep agent-specific integrations beyond what is clearly available (see below).
 
 ## Agent integrations: what we can and cannot promise
@@ -87,7 +99,7 @@ The product must never present an inference as proven fact. See
 
 ## Later (post-v0.1) ideas
 
-- React/TypeScript cinematic replay UI.
-- Shareable clips and cards with redaction.
+- GIF/MP4 export and optional hosted sharing of the privacy-safe exports.
+- File contents and diffs, with redaction.
 - Optional AI analyst (local or BYOK).
 - Agent-specific adapters where officially supported data exists.

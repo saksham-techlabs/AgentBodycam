@@ -61,11 +61,20 @@ const KIND_LABELS: Record<string, string> = {
   typecheck: "Typecheck",
 };
 
-// One or two lowercase words of a tool name (`pytest`, `npm test`, `cargo build`). No dots,
-// slashes, colons or uppercase: file names, paths, URLs and tokens never match.
-const SAFE_CHECK_NAME = /^[a-z][a-z0-9_+-]*(?: [a-z][a-z0-9_+-]*)?$/;
-// Long digit or hex runs look like identifiers or secrets rather than tool names.
-const ID_LIKE = /[0-9a-f]{8,}|[0-9]{5,}/;
+// Exactly the names the recorder generates for recognised tools (core/checks.py). An explicit
+// `--check` of any other program is named after its file, which may be private: generic here.
+const KNOWN_CHECK_NAMES: ReadonlySet<string> = new Set([
+  "pytest",
+  "unittest",
+  "build",
+  "mypy",
+  "pyright",
+  "ruff",
+  "eslint",
+  "tsc",
+  ...["npm", "pnpm", "yarn"].flatMap((m) => ["test", "build", "lint", "typecheck"].map((s) => `${m} ${s}`)),
+  ...["cargo", "go", "dotnet"].flatMap((t) => [`${t} test`, `${t} build`]),
+]);
 
 /** `text` cut to at most `max` characters, ending in an ellipsis when cut. */
 export function bound(text: string, max: number): string {
@@ -88,8 +97,7 @@ export function safeKind(kind: string | null): string | null {
 
 /** The check name if it passes the allowlist, else null (shown generically). */
 export function safeCheckName(name: string | null): string | null {
-  if (name === null || name.length > MAX_CHECK_NAME_CHARS) return null;
-  return SAFE_CHECK_NAME.test(name) && !ID_LIKE.test(name) ? name : null;
+  return name !== null && KNOWN_CHECK_NAMES.has(name) ? name : null;
 }
 
 function checkLabel(kind: string | null, name: string | null, outcome: "failed" | "passed"): string {

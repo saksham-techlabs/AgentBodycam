@@ -195,6 +195,26 @@ def test_assignment_paths_and_embedded_roots_are_rewritten() -> None:
     assert str(HOME) not in "".join(result.argv)
 
 
+def test_foreign_style_absolute_paths_are_hidden_on_every_platform() -> None:
+    for path in (r"C:\Users\alice\secret.txt", "D:/data/x.txt", r"\\server\share\x"):
+        assert redact("tool", path, f"--out={path}") == (
+            "tool",
+            EXTERNAL_PATH,
+            f"--out={EXTERNAL_PATH}",
+        ), path
+
+
+def test_rooted_paths_are_hidden_but_single_switches_are_kept() -> None:
+    hidden = ["/home/alice/.ssh/id_rsa", "/etc/passwd"]
+    if WINDOWS:
+        hidden.append(r"\Users\alice\notes.txt")  # on POSIX this is just a file name
+    for path in hidden:
+        assert redact("tool", path) == ("tool", EXTERNAL_PATH), path
+    switches = ("/c", "/?", "/p:Configuration=Release", "/Q")
+    expected = (EXTERNAL_PATH,) * len(switches) if not WINDOWS else switches
+    assert redact("cmd", *switches) == ("cmd", *expected)
+
+
 def test_relative_paths_are_kept_as_typed() -> None:
     assert redact("python", "scripts/build.py", "../sibling") == (
         "python",

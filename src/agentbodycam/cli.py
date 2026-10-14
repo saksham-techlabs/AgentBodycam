@@ -124,8 +124,8 @@ def build_parser() -> argparse.ArgumentParser:
             "report of a recorded session (`agentbodycam analyze`), served locally by a "
             "read-only, authenticated Replay API (`agentbodycam replay-api`) and browsable "
             "in an early local Replay UI (`agentbodycam replay`; sessions, timeline with "
-            "playback controls, findings). Other terminal commands and agent internals are "
-            "not captured."
+            "playback controls, findings, local privacy-safe SVG / JSON / WebM export). "
+            "Other terminal commands and agent internals are not captured."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -154,7 +154,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     session = subparsers.add_parser(
         "session",
-        help="Manage local AgentBodycam sessions (no recording yet).",
+        help="List, inspect and create local AgentBodycam sessions.",
         description="Create and inspect local sessions stored under .agentbodycam/.",
     )
     session_commands = session.add_subparsers(
@@ -188,7 +188,8 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             "Start a new session and record observed file creations, modifications and "
             "deletions in the project, plus read-only Git state snapshots when the project "
-            "is in a Git repository (polling; no command or agent capture). "
+            "is in a Git repository (polling; commands are recorded only through "
+            "`agentbodycam run`, agents are not observed). "
             "Stop with Ctrl+C."
         ),
     )
@@ -316,7 +317,8 @@ def build_parser() -> argparse.ArgumentParser:
     replay = subparsers.add_parser(
         "replay",
         parents=[project],
-        help="Open the local Replay UI (under development: sessions, timeline, findings).",
+        help="Serve the local Replay UI (under development: sessions, timeline, findings, "
+        "local export).",
         description=(
             "Serve the Replay UI and the Replay API from one loopback address, then open the "
             "printed address in your browser. Runs in the foreground until Ctrl+C. The UI "

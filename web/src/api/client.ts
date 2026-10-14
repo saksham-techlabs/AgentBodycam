@@ -60,6 +60,8 @@ export class ReplayApiClient {
   readonly #fetch: FetchLike;
   readonly #listeners = new Set<() => void>();
   #token: string | null = null;
+  /** The bootstrap in flight, shared by every caller that needs a token meanwhile. */
+  #bootstrap: Promise<string> | null = null;
   #status: ConnectionStatus = "connecting";
 
   constructor(fetchImpl?: FetchLike) {
@@ -91,8 +93,39 @@ export class ReplayApiClient {
    * any cross-origin attempt into a CORS preflight, which the server never approves.
    */
   async connect(signal?: AbortSignal): Promise<void> {
-    const data = await this.#request(BOOTSTRAP_PATH, { [BOOTSTRAP_HEADER]: "bootstrap" }, signal);
-    this.#token = parsed(parseBootstrap, data).token;
+    await this.#freshToken(signal);
+  }
+
+  /**
+   * A token from `/ui/bootstrap`, fetched at most once at a time: concurrent callers share
+   * the request in flight. An abort rejects only the caller whose signal fired; if the
+   * shared request was aborted by its starter, the other callers start a new one.
+   */
+  async #freshToken(signal: AbortSignal | undefined): Promise<string> {
+    for (;;) {
+      signal?.throwIfAborted();
+      let pending = this.#bootstrap;
+      if (pending === null) {
+        pending = this.#fetchToken(signal);
+        this.#bootstrap = pending;
+      }
+      try {
+        return await untilAborted(pending, signal);
+      } catch (error) {
+        if (!isAbort(error) || signal?.aborted === true) throw error;
+      }
+    }
+  }
+
+  async #fetchToken(signal: AbortSignal | undefined): Promise<string> {
+    try {
+      const data = await this.#request(BOOTSTRAP_PATH, { [BOOTSTRAP_HEADER]: "bootstrap" }, signal);
+      const { token } = parsed(parseBootstrap, data);
+      this.#token = token;
+      return token;
+    } finally {
+      this.#bootstrap = null;
+    }
   }
 
   async health(signal?: AbortSignal): Promise<HealthResponse> {
@@ -151,30 +184,25 @@ export class ReplayApiClient {
 
   /**
    * A bearer-authenticated GET. A 401 means the token is missing, wrong or belongs to an
-   * earlier server instance (tokens die with their server), so the token is dropped, the
-   * page bootstraps exactly once more and the request is retried exactly once; a second
-   * 401 is reported as unauthorized. Aborts propagate at every step.
+   * earlier server instance (tokens die with their server), so the token is dropped and the
+   * request is retried exactly once with a fresh one; a second 401 is reported as
+   * unauthorized. Requests rejected in parallel share one bootstrap, and a request whose
+   * token was already replaced meanwhile retries with the replacement without
+   * bootstrapping. Aborts propagate at every step.
    */
   async #authorized(path: string, signal: AbortSignal | undefined): Promise<unknown> {
-    if (this.#token === null) {
-      await this.connect(signal);
-      signal?.throwIfAborted();
-    }
+    const token = this.#token ?? (await this.#freshToken(signal));
+    signal?.throwIfAborted();
     try {
-      return await this.#request(path, this.#authHeader(), signal);
+      return await this.#request(path, bearer(token), signal);
     } catch (error) {
       if (!(error instanceof ApiError && error.kind === "unauthorized")) throw error;
-      this.#token = null;
+      if (this.#token === token) this.#token = null;
       signal?.throwIfAborted();
-      await this.connect(signal);
+      const fresh = this.#token ?? (await this.#freshToken(signal));
       signal?.throwIfAborted();
-      return this.#request(path, this.#authHeader(), signal);
+      return this.#request(path, bearer(fresh), signal);
     }
-  }
-
-  #authHeader(): Record<string, string> {
-    if (this.#token === null) throw new ApiError("unauthorized");
-    return { Authorization: `Bearer ${this.#token}` };
   }
 
   async #request(
@@ -215,6 +243,30 @@ export class ReplayApiClient {
 function sessionPath(sessionId: string): string {
   if (!isSessionId(sessionId)) throw new ApiError("bad_request", null, "invalid_session_id");
   return `/api/v1/sessions/${sessionId}`;
+}
+
+function bearer(token: string): Record<string, string> {
+  return { Authorization: `Bearer ${token}` };
+}
+
+/** `promise`, or a rejection with the signal's reason as soon as `signal` aborts. */
+function untilAborted<T>(promise: Promise<T>, signal: AbortSignal | undefined): Promise<T> {
+  if (signal === undefined) return promise;
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => reject(signal.reason);
+    promise.then(
+      (value) => {
+        signal.removeEventListener("abort", onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener("abort", onAbort);
+        reject(error);
+      },
+    );
+    if (signal.aborted) onAbort();
+    else signal.addEventListener("abort", onAbort, { once: true });
+  });
 }
 
 function parsed<T>(parse: (value: unknown) => T, value: unknown): T {

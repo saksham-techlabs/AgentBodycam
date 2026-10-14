@@ -36,6 +36,18 @@ htmlcov/
 .DS_Store
 Thumbs.db
 
+# Logs, source maps (never shipped in the UI build) and local exports
+*.log
+*.map
+*.webm
+agentbodycam-replay.svg
+agentbodycam-summary.json
+
 # Secrets
 .env
 .env.*
+.envrc
+*.pem
+*.key
+*.p12
+*.pfx

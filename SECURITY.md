@@ -65,7 +65,9 @@ Wrapped commands (`agentbodycam run -- <command> [args...]`):
   `Authorization: ...`), URL credentials and sensitive query parameters, recognisable API
   keys/tokens and long random-looking strings become `<redacted>`; absolute paths become
   project-relative or `<external-path>`, and the project and home directories are never
-  stored verbatim. The argument list is capped (64 items, 256 characters each, 4096 in
+  stored verbatim. Drive and UNC paths (`C:\...`, `\\server\...`) count as absolute on
+  every platform, and on Windows so do driveless rooted paths with two or more segments
+  (`/home/<name>/...`, `\Users\<name>\...`); single-segment switches such as `/c` are kept. The argument list is capped (64 items, 256 characters each, 4096 in
   total). Redaction is pattern-based and conservative but cannot recognise every secret:
   avoid passing secrets on the command line, as you would for shell history.
 - `command.finished` stores the exit code or signal, duration, child PID, an outcome and,
@@ -121,9 +123,9 @@ Communication with it is **local IPC over the loopback interface**, not network 
   no outbound connection.
 - **Browser protections.** No CORS: no `Access-Control-*` header is ever sent (no
   wildcard, no preflight approval), so a web page on another origin cannot read responses.
-  Requests with a foreign `Origin`, `Sec-Fetch-Site: cross-site|same-site`, or a `Host`
-  header other than this server's loopback address and port (DNS rebinding) are refused
-  with `403`. Every response is JSON with `Cache-Control: no-store`,
+  Requests with a foreign or `null` `Origin`, `Sec-Fetch-Site: cross-site|same-site`, a
+  repeated `Origin`, `Host` or `Sec-Fetch-Site` header, or a `Host` header other than this
+  server's loopback address and port (DNS rebinding) are refused with `403`. Every response is JSON with `Cache-Control: no-store`,
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, a restrictive
   `Content-Security-Policy` and `Cross-Origin-Resource-Policy: same-origin`. The Replay UI
   is served from this same local origin, so CORS is not needed.
@@ -187,8 +189,10 @@ request:
 The page keeps the token in a private field of its API client, in memory only. It is never
 placed in a URL or query string, `localStorage`, `sessionStorage`, IndexedDB or cookies,
 never logged, never written to disk, and is not returned by any `/api` route. Reloading the
-page fetches it again; it stops working when the server stops. Bearer authentication on
-`/api` routes is unchanged.
+page fetches it again; it stops working when the server stops. When the server restarts,
+the first rejected request fetches a new token and is retried once; requests rejected at
+the same time share that one bootstrap instead of each fetching their own. Bearer
+authentication on `/api` routes is unchanged.
 
 **Threat model.**
 
@@ -203,6 +207,72 @@ page fetches it again; it stops working when the server stops. Bearer authentica
   `replay` is running. Only use `replay` on a machine where you trust the other local
   accounts, or use `replay-api`, which offers no bootstrap. The server never listens
   beyond loopback, so other machines cannot reach it.
+
+## Local exports (SVG share card, JSON summary, WebM replay clip)
+
+The Replay UI's Export panel creates files only when you click a download button. They are
+generated in your browser and saved as local files; nothing is uploaded, copied to the
+clipboard or sent anywhere.
+
+- **One public-safe model.** All three formats are built from a dedicated model that
+  copies named report fields only: counts, event sequence numbers, the recording state,
+  check kinds and results, and labels rebuilt from structured fields (`Test failed:
+  pytest`). Check names appear only when they are one of the names AgentBodycam generates
+  for recognised tools (`pytest`, `npm test`, `cargo build`, ...); anything else, including
+  the program name of an explicit `--check` on an unrecognised command, becomes a generic
+  label. Free-text summaries are never copied.
+- **Never exported:** the project name or path, any absolute or relative file path, user
+  or host names, session and event IDs, timestamps, the bearer token, argv, environment
+  variables, command output, raw payloads, hashes or SHAs, Git branch, upstream or remote,
+  file contents and diffs.
+- **SVG:** an explicit element tree serialised from an allowlist of presentational
+  elements and attribute names, checked at run time. No script, `foreignObject`, links,
+  `href`, event handlers, styles, images or external URLs; paint may only reference a
+  gradient in the same file; every text node and attribute value is XML-escaped.
+- **JSON:** a fixed list of keys (`"format": "agentbodycam-share-summary"`, `"version": 1`).
+- **WebM:** a generated animation, **not a screen capture**. A scene plan is built from
+  the same public-safe model only (never the raw report), drawn frame by frame with Canvas
+  2D on an off-screen canvas using bounded strings, and encoded by the browser's own
+  `MediaRecorder`. No screen, window, tab, camera or microphone capture API is used, and
+  no network request is made. The UI's Content Security Policy was not loosened for it.
+
+An exported file is meant to be shareable, but it still shows that a session happened,
+its size and which checks failed or passed; review it before sharing.
+
+## Threat model summary
+
+In scope:
+
+- *Web pages in your browser* reading recorded evidence or the token: prevented by the
+  loopback-only server, `Host`/`Origin`/fetch-metadata checks, no CORS and the bootstrap
+  rules above.
+- *Leaks through what AgentBodycam writes or shows*: recorded evidence excludes file
+  contents, output, environment and recognisable secrets; API responses, errors, logs and
+  exports exclude absolute paths, tokens and raw payloads; the UI renders fixed error text,
+  never backend or exception messages.
+- *Hostile project contents* (odd file names, symlinks, junctions, huge files, secret
+  files): links are not followed, secret file names are skipped, files over 256 MiB are
+  not hashed, events and API pages are size-capped, and every string the UI or an export
+  shows is escaped or rebuilt.
+
+Out of scope (AgentBodycam cannot defend against them):
+
+- Programs or people running as your own user account: they can read `.agentbodycam/`
+  and your project directly. With `agentbodycam replay` running, other local accounts that
+  can reach the loopback port can also obtain the token (see above).
+- A compromised machine, browser or Python installation.
+- Secrets typed in a form the redaction patterns do not recognise (for example a short
+  password after an unrecognised flag such as `-p`). Avoid secrets on command lines.
+
+## Known limitations
+
+- Session data under `.agentbodycam/` is stored unencrypted and includes the absolute
+  project path (which can contain your user name) and file SHA-256 hashes.
+- Redaction is pattern-based and conservative, not a guarantee.
+- The Replay server re-reads a session's whole event log for every timeline page and
+  report request, so very large sessions (tens of thousands of events) respond slowly.
+  This is a performance limitation, not a security issue.
+- No release has been made and no independent security audit has taken place yet.
 
 ## Reporting a vulnerability
 

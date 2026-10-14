@@ -34,6 +34,23 @@ export interface SvgNode {
 
 export const SVG_NS = "http://www.w3.org/2000/svg";
 
+// `SvgTag` is only a compile-time type; serialization re-checks every tag at run time.
+const SVG_TAGS: ReadonlySet<string> = new Set<SvgTag>([
+  "svg",
+  "title",
+  "desc",
+  "defs",
+  "linearGradient",
+  "radialGradient",
+  "stop",
+  "g",
+  "rect",
+  "circle",
+  "line",
+  "path",
+  "text",
+  "tspan",
+]);
 const ATTR_NAME = /^[a-zA-Z][a-zA-Z0-9-]*$/;
 const FORBIDDEN_ATTR = /^(on|href$|style$|src$)/i;
 // Paint may reference a gradient defined in the same document, nothing else.
@@ -42,6 +59,10 @@ const LOCAL_URL = /^url\(#[a-z][a-z0-9-]*\)$/;
 
 export function el(tag: SvgTag, attrs: SvgAttrs = {}, ...children: (SvgNode | string | null)[]): SvgNode {
   return { tag, attrs, children: children.filter((c): c is SvgNode | string => c !== null) };
+}
+
+export function assertSafeTag(tag: string): void {
+  if (!SVG_TAGS.has(tag)) throw new Error("unsafe SVG element");
 }
 
 export function assertSafeAttr(name: string, value: string | number): void {
@@ -68,6 +89,7 @@ function format(value: string | number): string {
 
 function serializeNode(node: SvgNode | string): string {
   if (typeof node === "string") return escapeXml(node);
+  assertSafeTag(node.tag);
   const attrs = Object.entries(node.attrs)
     .map(([name, value]) => {
       assertSafeAttr(name, value);
