@@ -9,10 +9,12 @@
 > `agentbodycam run -- <command>` and whether those that are tests, builds, lints or type
 > checks passed or failed, it can produce a deterministic local forensic report of a
 > recorded session (`agentbodycam analyze`), it can serve recorded evidence through a
-> local, authenticated, read-only Replay API (`agentbodycam replay-api`), and it has an
-> early **preview** of the local Replay UI (`agentbodycam replay`: session dashboard and
-> session overview only). It does not observe arbitrary terminal commands, does not
-> integrate with any specific agent, and has no timeline replay, export or AI features yet.
+> local, authenticated, read-only Replay API (`agentbodycam replay-api`), and it has a
+> local Replay UI under development (`agentbodycam replay`: dashboard, session overview,
+> paginated forensic timeline with failure / recovery / unresolved markers, findings,
+> observed files and the last recorded Git / final state). It does not observe arbitrary
+> terminal commands and does not integrate with any specific agent. Cinematic playback and
+> scrubbing, file contents and diffs, share/export and an AI analyst do not exist yet.
 > Expect breaking changes.
 >
 > Implemented:
@@ -170,7 +172,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: agent integrations, timeline replay, export or AI.
+- Not yet: agent integrations, cinematic playback, export or AI.
 
 ### Recording commands you run
 
