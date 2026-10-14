@@ -12,7 +12,7 @@ export const CARD_WIDTH = 1200;
 export const CARD_HEIGHT = 630;
 export const CARD_TITLE = "AgentBodycam session replay summary";
 
-const C = {
+export const SHARE_COLORS = {
   bg: "#06090f",
   panel: "#0d131d",
   border: "#1a2331",
@@ -25,16 +25,17 @@ const C = {
   red: "#ff5d6c",
   amber: "#f2b14c",
   slate: "#8d9bb3",
-};
+} as const;
+const C = SHARE_COLORS;
 
-const SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
-const MONO = 'ui-monospace, "SF Mono", "Cascadia Mono", Consolas, Menlo, monospace';
+export const SANS = 'system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif';
+export const MONO = 'ui-monospace, "SF Mono", "Cascadia Mono", Consolas, Menlo, monospace';
 
 const LEFT = 64;
 const RIGHT = CARD_WIDTH - 64;
 const INNER = RIGHT - LEFT;
 
-const STATE_PILL: Record<RecordingState, { text: string; color: string }> = {
+export const STATE_PILL: Record<RecordingState, { text: string; color: string }> = {
   recording: { text: "LIVE · SO FAR", color: C.blue },
   stopped: { text: "STOPPED", color: C.slate },
   ended_without_stop: { text: "ENDED WITHOUT STOP", color: C.amber },
@@ -42,14 +43,14 @@ const STATE_PILL: Record<RecordingState, { text: string; color: string }> = {
   not_started: { text: "NOT STARTED", color: C.slate },
 };
 
-const VERDICT: Record<ShareVerdict, { text: string; color: string }> = {
+export const VERDICT: Record<ShareVerdict, { text: string; color: string }> = {
   pass: { text: "Checks: PASS", color: C.green },
   fail: { text: "Checks: FAIL", color: C.red },
   partial: { text: "Checks: PARTIAL", color: C.amber },
   none: { text: "No checks", color: C.slate },
 };
 
-function formatNumber(n: number): string {
+export function formatNumber(n: number): string {
   return n >= 999_999 ? "999,999+" : String(n).replace(/\B(?=(\d{3})+(?!\d))/g, ",");
 }
 

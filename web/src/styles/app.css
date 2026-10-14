@@ -3162,8 +3162,13 @@ button.session-row:hover:not(:disabled) {
 
 .export-formats {
   display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
+  grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 10px;
+}
+
+.export-format:disabled {
+  cursor: not-allowed;
+  opacity: 0.5;
 }
 
 .export-format {
@@ -3262,6 +3267,107 @@ button.session-row:hover:not(:disabled) {
   gap: 12px;
 }
 
+.export-clip {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding: 16px 18px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  font-size: 13px;
+}
+
+.export-clip-lede {
+  margin: 0;
+  font-size: 15px;
+  font-weight: 600;
+}
+
+.export-clip-facts {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+  margin: 0;
+}
+
+.export-clip-facts dt {
+  color: var(--text-3);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.export-clip-facts dd {
+  margin: 3px 0 0;
+  color: var(--text);
+}
+
+.export-clip-scenes {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  counter-reset: clip-scene;
+}
+
+.export-clip-scenes li {
+  padding: 3px 9px;
+  border: 1px solid var(--border-strong);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 12px;
+  counter-increment: clip-scene;
+}
+
+.export-clip-scenes li::before {
+  content: counter(clip-scene, decimal-leading-zero) " ";
+  color: var(--text-3);
+  font-family: var(--mono);
+}
+
+.export-clip-safe {
+  margin: 0;
+  color: var(--text-2);
+}
+
+.export-clip-bar {
+  height: 6px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.export-clip-bar span {
+  display: block;
+  height: 100%;
+  background: var(--blue);
+}
+
+.export-clip-status {
+  min-height: 1.4em;
+  margin: 0;
+  font-family: var(--mono);
+  font-size: 12px;
+  color: var(--text-2);
+}
+
+.export-clip-status.is-error {
+  color: var(--red);
+}
+
+.export-clip-actions {
+  display: flex;
+  gap: 8px;
+}
+
+.export-dialog .button[aria-disabled="true"] {
+  cursor: progress;
+  opacity: 0.7;
+}
+
 .export-local {
   margin: 0;
   font-size: 12px;
@@ -3280,7 +3386,8 @@ button.session-row:hover:not(:disabled) {
 }
 
 @media (max-width: 640px) {
-  .export-formats {
+  .export-formats,
+  .export-clip-facts {
     grid-template-columns: 1fr;
   }
   .export-actions {

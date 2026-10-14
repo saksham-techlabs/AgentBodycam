@@ -14,9 +14,10 @@
 > paginated forensic timeline with failure / recovery / unresolved markers, replay
 > playback controls and a scrubber, findings, observed files and the last recorded Git /
 > final state, presented as a cinematic replay view, plus a local privacy-safe export:
-> an SVG share card and a JSON summary). It does not observe arbitrary terminal commands
-> and does not integrate with any specific agent. File contents and diffs, GIF/video
-> export, hosted sharing and an AI analyst do not exist yet. Expect breaking changes.
+> an SVG share card, a JSON summary and a short generated WebM replay clip). It does not
+> observe arbitrary terminal commands and does not integrate with any specific agent.
+> File contents and diffs, GIF/MP4 export, hosted sharing and an AI analyst do not exist
+> yet. Expect breaking changes.
 >
 > Implemented:
 > - file recording
@@ -35,12 +36,15 @@
 >   and unresolved failures
 > - local privacy-safe SVG share card (generated in the browser, nothing uploaded)
 > - privacy-safe JSON summary export
+> - browser-local WebM replay clip export: a short (8-12 s) animation generated from the
+>   same privacy-safe data, encoded by the browser (not a screen capture)
 >
 > Still not implemented:
 > - possible final micro-polish of the replay view
 > - file contents and diffs
-> - GIF/video export
-> - hosted sharing (exports are local files only)
+> - GIF export
+> - MP4 export
+> - hosted/cloud sharing (exports are local files only)
 > - agent-specific adapters
 > - optional AI analyst
 
@@ -82,7 +86,7 @@ It is designed to be:
 | Local forensics engine (`analyze`) | Implemented (deterministic, read-only, observed findings only) |
 | Local Replay API (`replay-api`) | Implemented (loopback only, temporary bearer token, read-only, standard library only) |
 | Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, replay playback controls and scrubber in a sticky replay view, findings, observed files, last recorded Git/final state, local privacy-safe export |
-| Share/export | Local SVG share card and JSON summary (privacy-safe, generated in the browser); no GIF/video, no hosted sharing |
+| Share/export | Local SVG share card, JSON summary and WebM replay clip (privacy-safe, generated in the browser); no GIF, no MP4, no hosted sharing |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
 | Optional AI analysis | Not started |
 
@@ -182,7 +186,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: agent integrations, GIF/video export or AI.
+- Not yet: agent integrations, GIF/MP4 export or AI.
 
 ### Recording commands you run
 
@@ -372,7 +376,7 @@ AgentBodycam Replay (UI preview)
 Project: C:\work\app
 Listening: http://127.0.0.1:54321
 Open in your browser: http://127.0.0.1:54321/
-The Replay UI is under development: playback and local privacy-safe export (SVG card, JSON summary) exist; GIF/video export does not.
+The Replay UI is under development: playback and local privacy-safe export (SVG card, JSON summary, WebM replay clip) exist; GIF/MP4 export does not.
 Access is granted automatically to the page served at this address; the address contains no secret and nothing is stored in your browser.
 Read-only, loopback only.
 Press Ctrl+C to stop.
@@ -426,11 +430,21 @@ run time). Today it shows:
     files changed, failed checks, observed recoveries, unresolved failures, the first
     observable failure and the first observed recovery (event number and a label such as
     `Test failed: pytest`) and the final (or, while live, latest) recorded check state;
+  - **Replay clip**: a generated 1280 × 720, 30 fps WebM animation
+    (`agentbodycam-replay.webm`, about 8-12 seconds, never more than 15) built from the
+    same facts: intro, session stats, first observable failure, observed recovery (or
+    UNRESOLVED IN THIS RECORDING), final (or, while live, latest) recorded state and an
+    outro. Scenes without a matching finding are skipped. It is drawn frame by frame on
+    an off-screen canvas and encoded by your browser's own `MediaRecorder` (VP9, else
+    VP8, else the browser's default WebM codec), so rendering takes about as long as the
+    clip, with progress and a Cancel button. It is not a screen capture: nothing on your
+    screen or page is recorded. Browsers without `MediaRecorder` or canvas capture
+    streams show "Replay clip export is not supported in this browser.";
   - **JSON summary**: the same facts as `agentbodycam-summary.json`
     (`"format": "agentbodycam-share-summary"`, `"version": 1`), not the raw report.
 
-  Both are generated in your browser from an allowlist of safe fields and saved as local
-  files; nothing is uploaded and nothing is copied to the clipboard. They never contain
+  All three are generated in your browser from an allowlist of safe fields and saved as
+  local files; nothing is uploaded and nothing is copied to the clipboard. They never contain
   the project name or path, session ID, event IDs, timestamps, file paths, command lines,
   Git branch / commit / remote, environment, file contents, hashes, tokens or free-text
   summaries. Check names appear only when they are one of AgentBodycam's generated tool
@@ -440,8 +454,8 @@ run time). Today it shows:
 All findings are observed facts from the recording: the UI never attributes a failure or
 a recovery to a file change. While a session is live the report and timeline refresh
 every 2.5 s (never overlapping, paused while the browser tab is hidden); playback pauses
-too while the tab is hidden. File contents and diffs, GIF/video export and hosted sharing
-are **not implemented yet**.
+too while the tab is hidden. File contents and diffs, GIF and MP4 export and hosted
+sharing are **not implemented yet**.
 
 How the page gets API access: the page asks its own server for the temporary token with a
 same-origin `fetch()` (`GET /ui/bootstrap`, which requires a custom header and browser

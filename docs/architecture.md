@@ -15,9 +15,10 @@
 > overview, paginated forensic timeline with first-failure / recovery / unresolved
 > markers, replay playback controls and scrubber, findings, observed files and last
 > recorded Git / final state, with the replay styled as a sticky "replay theater"), with a
-> local privacy-safe export (SVG share card and JSON summary, section 3.7). Capture of
-> commands not launched through `agentbodycam run`, adapters, file contents and diffs,
-> GIF/video export, hosted sharing and AI are not implemented.
+> local privacy-safe export (SVG share card, JSON summary and a browser-generated WebM
+> replay clip, section 3.7). Capture of commands not launched through `agentbodycam run`,
+> adapters, file contents and diffs, GIF/MP4 export, hosted sharing and AI are not
+> implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -1175,10 +1176,10 @@ timing model, pagination, API and event schemas are unchanged.
   not applied (JS) and all transitions and animations are off (CSS).
 
 **Export** (see section 3.7): an Export button in the session top bar opens a local
-export panel (SVG share card, JSON summary).
+export panel (SVG share card, WebM replay clip, JSON summary).
 
 **Not implemented yet.** Possible final micro-polish (10C.2B), file contents and diff
-viewer, GIF/video export and hosted sharing.
+viewer, GIF/MP4 export and hosted sharing.
 
 **API client** (`web/src/api/`). GET only, `cache: "no-store"`, `credentials:
 "same-origin"`, `redirect: "error"`, `referrerPolicy: "no-referrer"`, an `AbortSignal` per
@@ -1251,15 +1252,15 @@ Testing Library (`npm run test`) against a fake server that mirrors the real rou
 `tests/test_replay_ui.py` for serving, headers, path safety, bootstrap, the CLI and
 wheel packaging.
 
-Still to come: possible final micro-polish of the replay view, file/diff views, GIF/video
+Still to come: possible final micro-polish of the replay view, file/diff views, GIF/MP4
 export, and clearly different styling of facts and inferences (section 2).
 
 ### 3.7 Share / export pipeline
 
-**Implemented (local, in the Replay UI):** a privacy-safe SVG share card and a
-privacy-safe JSON summary. Everything runs in the browser from the already-loaded
-forensic report; no request is made, nothing is uploaded, nothing is written to the
-clipboard, and no dependency or CSP change was needed.
+**Implemented (local, in the Replay UI):** a privacy-safe SVG share card, a
+privacy-safe JSON summary and a browser-local WebM replay clip. Everything runs in the
+browser from the already-loaded forensic report; no request is made, nothing is
+uploaded, nothing is written to the clipboard, and no dependency or CSP change was needed.
 
 ```text
 ForensicReport ──buildShareModel()──▶ ShareCardModel ──buildShareCard()──▶ SvgNode tree
@@ -1312,7 +1313,72 @@ ForensicReport ──buildShareModel()──▶ ShareCardModel ──buildShareC
 - **PNG** is not offered: drawing the SVG into a canvas would need a `blob:` or `data:`
   image source, which the UI's `img-src 'self'` deliberately forbids.
 
-**Planned, not implemented:** GIF/video replays, excerpts, user-configurable redaction,
+**WebM replay clip.** A short generated animation of the same safe facts, not a screen
+capture: nothing on the screen, page or DOM is recorded. Four separate stages:
+
+```text
+ShareCardModel ──planReplayClip()──▶ ReplayClipTimeline ──drawClipFrame(ctx, t, frame)──▶ off-screen canvas
+ (approved fields)  (lib/clipPlan.ts)   (scenes, pure data)   (lib/clipDraw.ts, Canvas 2D)        │
+                                                                                     canvas.captureStream(30)
+                                                                                                  ▼
+                       agentbodycam-replay.webm ◀── downloadBlob() ◀── MediaRecorder (lib/clipRecorder.ts)
+```
+
+- **Safe data.** `planReplayClip()` takes a `ShareCardModel` only (the clip modules do
+  not import the report type) and copies named fields into fixed-template scenes; every
+  string a frame can draw is either a fixed phrase or a value the share model already
+  approved (counts, event sequence numbers, rebuilt labels, allowlisted check names).
+  `clipTexts()` lists them for review and tests.
+- **Scenes.** Intro (`AgentBodycam`, `YOUR AI CODING AGENT HAS A BODYCAM`, `Recorded
+  evidence replay`), session stats (events, files changed, observable failures, observed
+  recoveries, with the finding markers on a `#1 … #N` event axis), FIRST OBSERVABLE
+  FAILURE (`#n` and label), OBSERVED RECOVERY (or, when failures have no observed
+  recovery, UNRESOLVED IN THIS RECORDING), FINAL RECORDED STATE (verdict, passing /
+  failing counts, up to 4 checks, unresolved count) and an outro (`Recorded with
+  AgentBodycam`, `Local-first · No source code uploaded`). Scenes without a matching
+  finding are skipped. A live session says LATEST RECORDED STATE and LIVE SNAPSHOT and
+  never implies the recording is complete. No causal and no screen-recording wording.
+- **Duration.** 1280 × 720 at a fixed 30 fps. Scene lengths are fixed in frames (intro
+  54, stats 75, each finding 60, final 66, outro 45), so a clip lasts 8 s with no
+  findings and 12 s at most; `MAX_CLIP_FRAMES` (15 s) is a hard cap. Session size never
+  changes the length: this is a share clip, not an event-by-event recording.
+- **Drawing.** `drawClipFrame()` is a pure function of the plan and a frame number, using
+  a small `CanvasRenderingContext2D` subset (rectangles, paths, arcs, gradients, text with
+  a `maxWidth`) and the share card's palette and system font stacks. No images, no SVG
+  rasterization, no `data:`/`blob:` image sources, no WebGL, no DOM capture. Animation is
+  restrained: fade and a 16 px slide in (12 frames) and fade out (8 frames) per scene,
+  staggered stat tiles with a count-up, finding markers sliding along the event axis and
+  a clip progress bar with scene ticks. The UI's own reduced-motion behaviour is
+  unchanged; the exported file is animated because the user asked for an animation.
+- **Encoding.** `detectClipSupport()` requires `MediaRecorder`, `isTypeSupported` and
+  `HTMLCanvasElement.prototype.captureStream`, then picks the first supported type of
+  `video/webm;codecs=vp9`, `video/webm;codecs=vp8`, `video/webm`; otherwise the panel says
+  "Replay clip export is not supported in this browser." and Export WebM is disabled.
+  `recordReplayClip()` draws onto a canvas that is never attached to the page, records
+  `captureStream(30)` at 6 Mbit/s with 1 s chunks, and paces frames by elapsed time
+  (`performance.now()`), so the clip keeps its planned length even when timers are
+  throttled; rendering therefore takes about as long as the clip. Progress is reported as
+  Preparing…, Rendering N %, Encoding…, then Done. It resolves with a non-empty
+  `video/webm` Blob or rejects with a typed error: `unsupported` (no 2D context, no
+  capture stream, recorder construction refused), `recorder` (an `error` event, a throwing
+  `start`/`stop`, or no `stop` event within 10 s), `empty` (zero bytes) or `cancelled`.
+- **Cleanup.** On every outcome, before the promise settles, the frame timer and encode
+  timeout are cleared, the abort listener removed, the recorder's handlers detached and
+  the recorder stopped if still active, every stream track stopped, buffered chunks
+  dropped and the canvas shrunk to 0 × 0. The dialog's `useClipExport` hook runs one
+  export at a time (a ref guards against duplicate clicks), aborts it on Cancel, on Close
+  / Escape and on unmount, and ignores results that arrive after an abort.
+- **Download.** Fixed file name `agentbodycam-replay.webm` (no project, session, user or
+  time). The object URL is revoked 2 s after the click rather than immediately: a
+  multi-megabyte Blob may still be read by the browser's download manager after `click()`
+  returns, and revoking synchronously can abort the download in some browsers. The Blob
+  never leaves the page.
+- **Known limitations.** Chrome's `MediaRecorder` writes WebM without a duration header,
+  so some players show the length only after scanning the file (the frames and
+  timestamps are correct). Frame timing depends on the browser keeping up with 30 fps; a
+  busy machine can drop frames but not lengthen the clip.
+
+**Planned, not implemented:** GIF and MP4 export, excerpts, user-configurable redaction,
 and any hosted sharing (sharing stays an explicit user action with a local file).
 
 ### 3.8 Optional AI Analyst

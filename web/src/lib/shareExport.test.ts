@@ -1,8 +1,9 @@
 import { describe, expect, it } from "vitest";
 
-import type { ForensicReport, SessionSummary } from "../api/types";
-import { CAUSAL, RICH_TIMELINE, eventId, plainReport, richReport } from "../test/fixtures";
-import { SESSIONS, STOPPED_ID, TOKEN } from "../test/fakeServer";
+import type { SessionSummary } from "../api/types";
+import { CAUSAL, RICH_TIMELINE, plainReport, richReport } from "../test/fixtures";
+import { SESSIONS, STOPPED_ID } from "../test/fakeServer";
+import { FORBIDDEN, hostileReport } from "../test/hostile";
 import { JSON_FILENAME, SVG_FILENAME } from "./download";
 import { buildShareCard, shareCardSvg } from "./shareCard";
 import {
@@ -22,63 +23,6 @@ import { assertSafeAttr, el, serializeSvg, type SvgNode } from "./svg";
 function texts(node: SvgNode | string): string[] {
   return typeof node === "string" ? [node] : node.children.flatMap(texts);
 }
-
-/** A report whose free-text and identifying fields are full of things that must not leak. */
-function hostileReport(): ForensicReport {
-  const r = richReport(STOPPED_ID);
-  const first = r.first_observable_failure;
-  if (first === null) throw new Error("fixture has a first failure");
-  first.check_name = "src/auth/login.ts";
-  first.summary = 'Modified C:\\Users\\alice\\proj\\src\\auth\\login.ts <script>alert("x")</script>';
-  r.timeline.items = r.timeline.items.map((i) => ({ ...i, summary: `${i.summary} /home/alice/proj` }));
-  const recovery = r.recoveries.items[0];
-  if (recovery === undefined) throw new Error("fixture has a recovery");
-  recovery.name = '<script>alert("x")</script>';
-  recovery.summary = "pytest -q --token=sk-live-123 passed in /srv/app";
-  const states = r.final_check_states.items;
-  if (states[1] !== undefined) states[1].name = "deploy.sh";
-  if (r.latest_git_state !== null) {
-    r.latest_git_state.branch = "feature/secret-branch";
-    r.latest_git_state.head = "deadbee";
-    r.latest_git_state.upstream = "origin/feature/secret-branch";
-    r.latest_git_state.summary = "Git: feature/secret-branch @ deadbee";
-  }
-  r.warnings.items.push({ code: "x", severity: "info", message: `Bearer ${TOKEN}`, event_ids: [] });
-  return r;
-}
-
-const FORBIDDEN = [
-  STOPPED_ID,
-  "2222222222222222",
-  eventId(5),
-  eventId(14),
-  "f".repeat(64),
-  "cmd-1",
-  "1a2b3c4",
-  "deadbee",
-  "feature/secret-branch",
-  "origin/",
-  "pytest -q",
-  "ruff check .",
-  "npm run dev",
-  "src/",
-  "login.ts",
-  "deploy.sh",
-  "logs/locked.txt",
-  "PermissionError",
-  "C:\\",
-  "/home/",
-  "/srv/",
-  "alice",
-  "sk-live",
-  TOKEN,
-  "Bearer",
-  "<script",
-  "2026-10-14",
-  "event_id",
-  "payload",
-  "argv",
-];
 
 function expectClean(output: string): void {
   for (const value of FORBIDDEN) expect(output, value).not.toContain(value);

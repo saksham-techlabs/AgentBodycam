@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Browser-local **WebM replay clip** export. The Export panel now offers Share card,
+  **Replay clip** (WebM · 1280×720) and JSON summary. The replay clip is a generated
+  animation of recorded evidence, not a screen capture: an intro, session stats, the
+  first observable failure, the observed recovery (or UNRESOLVED IN THIS RECORDING), the
+  final (or, while live, latest) recorded state and an outro, skipping scenes without a
+  matching finding. It is planned from the same privacy-safe `ShareCardModel` only
+  (`planReplayClip()`, a pure, deterministic scene/timeline model), drawn frame by frame
+  with Canvas 2D on an off-screen canvas (known shapes and approved strings only; no
+  images, SVG rasterization, WebGL or DOM capture), and encoded by the browser's
+  `MediaRecorder` from `canvas.captureStream(30)`, preferring VP9, then VP8, then plain
+  WebM. Fixed 30 fps, 8 s without findings, 12 s at most, never more than 15 s. The panel
+  shows the format, approximate duration, scene list, a privacy note and browser support;
+  unsupported browsers see "Replay clip export is not supported in this browser." Export
+  WebM shows Preparing…, Rendering N %, Encoding… and Done, blocks duplicate starts and
+  offers Cancel; cancelling, closing the dialog or unmounting stops the frame timer, the
+  recorder and every stream track and releases the canvas. Recorder errors, a recorder
+  that never stops and zero-byte results are reported and save nothing. The file is
+  `agentbodycam-replay.webm`; its object URL is revoked 2 s after the download click so
+  large downloads are not cut off. No network request, dependency or CSP change. Still
+  not implemented: GIF and MP4 export, hosted sharing, file contents/diffs,
+  agent-specific adapters and an optional AI analyst.
 - Local privacy-safe replay exports in the Replay UI. An **Export** button in the session
   top bar opens a small accessible panel (labelled dialog, focus moved in and returned to
   the button, Tab kept inside, Escape / Close to dismiss) with two formats and a preview:
