@@ -23,6 +23,7 @@ from agentbodycam.cli import main
 from agentbodycam.core.recorder import Recorder
 from agentbodycam.core.replay import ReplayService
 from agentbodycam.core.store import EventStore
+from agentbodycam.core.ui_assets import load_ui_bundle
 from agentbodycam.models.events import EventDraft, EventSource, EventType
 from forensics_helpers import SessionBuilder
 from git_helpers import commit_all, init_repo, requires_git
@@ -246,4 +247,34 @@ def test_replay_api_is_loopback_ipc_only(
     finally:
         server.stop()
     # Every connection was the test client's own, to the loopback server.
+    assert set(_LoopbackOnlySocket.connected) == {"127.0.0.1"}
+
+
+def test_replay_ui_is_loopback_ipc_only(store: EventStore, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Serving the UI documents, assets and bootstrap reaches nothing beyond loopback."""
+    SessionBuilder(store).stop()
+    bundle = load_ui_bundle()
+    _LoopbackOnlySocket.connected = []
+    monkeypatch.setattr(socket, "socket", _LoopbackOnlySocket)
+    for name in DNS_AND_CLIENT_CALLS:
+        monkeypatch.setattr(socket, name, _refuse)
+    server = serve(store.project_root, ui=bundle)
+    try:
+        assert server.bound_address[0] == "127.0.0.1"
+        bootstrap = (
+            "X-AgentBodycam-UI: bootstrap\r\nSec-Fetch-Site: same-origin\r\n"
+            "Sec-Fetch-Mode: cors\r\nSec-Fetch-Dest: empty\r\n"
+        )
+        for path, extra in [
+            ("/", ""),
+            *((asset, "") for asset in bundle.assets),
+            ("/ui/bootstrap", bootstrap),
+        ]:
+            raw = (
+                f"GET {path} HTTP/1.1\r\nHost: 127.0.0.1:{server.port}\r\n{extra}"
+                "Connection: close\r\n\r\n"
+            ).encode()
+            assert raw_request(server.port, raw).status == 200, path
+    finally:
+        server.stop()
     assert set(_LoopbackOnlySocket.connected) == {"127.0.0.1"}

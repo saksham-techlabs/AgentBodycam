@@ -110,7 +110,8 @@ def test_cli_process_serves_and_stops_cleanly(project: Path, tmp_path: Path) -> 
         startup = api.output
         assert startup.startswith("AgentBodycam Replay API\n")
         assert "Authentication: enabled" in startup
-        assert "no Replay UI yet" in startup and "Press Ctrl+C to stop." in startup
+        assert "For the Replay UI, run `agentbodycam replay`" in startup
+        assert "Press Ctrl+C to stop." in startup
         assert startup.count(api.endpoint.token) == 1  # printed once, for the developer
         client = ApiClient(api.endpoint)
         assert client.get("/api/v1/health", token=None).status == 200

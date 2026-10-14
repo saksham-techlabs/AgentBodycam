@@ -12,6 +12,7 @@ from typing import Any, Protocol
 
 from agentbodycam.core.replay import ReplayService
 from agentbodycam.core.replay_server import ReplayServer
+from agentbodycam.core.ui_assets import UiBundle
 
 DEFAULT = object()
 
@@ -129,8 +130,12 @@ def store_snapshot(project: Path) -> dict[str, bytes]:
 
 
 def serve(
-    project: Path, *, host: str = "127.0.0.1", log: Callable[[str], None] | None = None
+    project: Path,
+    *,
+    host: str = "127.0.0.1",
+    log: Callable[[str], None] | None = None,
+    ui: UiBundle | None = None,
 ) -> ReplayServer:
-    server = ReplayServer(ReplayService(project), host=host, log=log)
+    server = ReplayServer(ReplayService(project), host=host, log=log, ui=ui)
     server.start()
     return server

@@ -34,6 +34,7 @@ dev = [
     "pytest>=8.0",
     "ruff>=0.6",
     "mypy>=1.11",
+    "hatchling>=1.21",  # the build backend; lets the tests build and inspect a real wheel
 ]
 
 [project.scripts]

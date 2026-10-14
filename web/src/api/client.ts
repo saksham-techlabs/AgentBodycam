@@ -1,0 +1,162 @@
+/**
+ * The only place the Replay UI talks to the network: same-origin GET requests to the
+ * Replay server that served this page.
+ *
+ * The bearer token is obtained from `/ui/bootstrap` and kept in a private field of this
+ * object, i.e. in this page's memory only. It is never written to localStorage,
+ * sessionStorage, cookies, the URL or the console, and it is sent nowhere but in the
+ * `Authorization` header of same-origin `/api/v1` requests. Reloading the page simply
+ * bootstraps again; closing it forgets the token.
+ */
+
+import { ApiError, isAbort, kindForStatus } from "./errors";
+import type { HealthResponse, ProjectSummary, SessionDetail, SessionsResponse } from "./types";
+import {
+  InvalidResponseError,
+  errorCode,
+  isSessionId,
+  parseBootstrap,
+  parseHealth,
+  parseProject,
+  parseSessionDetail,
+  parseSessions,
+} from "./validate";
+
+export const BOOTSTRAP_PATH = "/ui/bootstrap";
+export const BOOTSTRAP_HEADER = "X-AgentBodycam-UI";
+
+export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
+
+/** What the last request said about the server, for the connection indicator. */
+export type ConnectionStatus = "connecting" | "online" | "unreachable" | "unauthorized" | "refused";
+
+const BASE_INIT = {
+  method: "GET",
+  cache: "no-store",
+  credentials: "same-origin",
+  redirect: "error",
+  referrerPolicy: "no-referrer",
+} as const satisfies RequestInit;
+
+export class ReplayApiClient {
+  readonly #fetch: FetchLike;
+  readonly #listeners = new Set<() => void>();
+  #token: string | null = null;
+  #status: ConnectionStatus = "connecting";
+
+  constructor(fetchImpl?: FetchLike) {
+    this.#fetch = fetchImpl ?? ((input, init) => globalThis.fetch(input, init));
+  }
+
+  get hasAccess(): boolean {
+    return this.#token !== null;
+  }
+
+  get status(): ConnectionStatus {
+    return this.#status;
+  }
+
+  /** `useSyncExternalStore`-compatible subscription to {@link status}. */
+  readonly subscribe = (listener: () => void): (() => void) => {
+    this.#listeners.add(listener);
+    return () => this.#listeners.delete(listener);
+  };
+
+  #setStatus(status: ConnectionStatus): void {
+    if (status === this.#status) return;
+    this.#status = status;
+    for (const listener of this.#listeners) listener();
+  }
+
+  /**
+   * Obtain this server instance's temporary token for this page. The custom header turns
+   * any cross-origin attempt into a CORS preflight, which the server never approves.
+   */
+  async connect(signal?: AbortSignal): Promise<void> {
+    const data = await this.#request(BOOTSTRAP_PATH, { [BOOTSTRAP_HEADER]: "bootstrap" }, signal);
+    this.#token = parsed(parseBootstrap, data).token;
+  }
+
+  async health(signal?: AbortSignal): Promise<HealthResponse> {
+    return parsed(parseHealth, await this.#request("/api/v1/health", {}, signal));
+  }
+
+  async project(signal?: AbortSignal): Promise<ProjectSummary> {
+    return parsed(parseProject, await this.#authorized("/api/v1/project", signal));
+  }
+
+  async sessions(signal?: AbortSignal): Promise<SessionsResponse> {
+    return parsed(parseSessions, await this.#authorized("/api/v1/sessions", signal));
+  }
+
+  async session(sessionId: string, signal?: AbortSignal): Promise<SessionDetail> {
+    if (!isSessionId(sessionId)) throw new ApiError("bad_request", null, "invalid_session_id");
+    const data = await this.#authorized(`/api/v1/sessions/${sessionId}`, signal);
+    return parsed(parseSessionDetail, data);
+  }
+
+  /**
+   * A bearer-authenticated GET. A 401 means the token belongs to an earlier server
+   * instance (tokens die with their server), so the page bootstraps once more and retries
+   * once; a second 401 is reported.
+   */
+  async #authorized(path: string, signal: AbortSignal | undefined): Promise<unknown> {
+    const hadToken = this.#token !== null;
+    if (!hadToken) await this.connect(signal);
+    try {
+      return await this.#request(path, this.#authHeader(), signal);
+    } catch (error) {
+      if (!(hadToken && error instanceof ApiError && error.kind === "unauthorized")) throw error;
+      this.#token = null;
+      await this.connect(signal);
+      return this.#request(path, this.#authHeader(), signal);
+    }
+  }
+
+  #authHeader(): Record<string, string> {
+    if (this.#token === null) throw new ApiError("unauthorized");
+    return { Authorization: `Bearer ${this.#token}` };
+  }
+
+  async #request(
+    path: string,
+    headers: Record<string, string>,
+    signal: AbortSignal | undefined,
+  ): Promise<unknown> {
+    let response: Response;
+    try {
+      response = await this.#fetch(path, {
+        ...BASE_INIT,
+        headers: { Accept: "application/json", ...headers },
+        ...(signal === undefined ? {} : { signal }),
+      });
+    } catch (error) {
+      if (isAbort(error)) throw error;
+      this.#setStatus("unreachable");
+      throw new ApiError("unavailable");
+    }
+    if (response.status === 401) this.#setStatus("unauthorized");
+    else if (response.status === 403 && path === BOOTSTRAP_PATH) this.#setStatus("refused");
+    else this.#setStatus("online");
+    let body: unknown = null;
+    try {
+      body = await response.json();
+    } catch (error) {
+      if (isAbort(error)) throw error;
+    }
+    if (!response.ok) {
+      throw new ApiError(kindForStatus(response.status), response.status, errorCode(body));
+    }
+    if (body === null) throw new ApiError("invalid_response", response.status);
+    return body;
+  }
+}
+
+function parsed<T>(parse: (value: unknown) => T, value: unknown): T {
+  try {
+    return parse(value);
+  } catch (error) {
+    if (error instanceof InvalidResponseError) throw new ApiError("invalid_response");
+    throw error;
+  }
+}

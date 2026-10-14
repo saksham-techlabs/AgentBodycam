@@ -7,6 +7,12 @@ build/
 dist/
 *.whl
 
+# Frontend (web/); the built UI in src/agentbodycam/ui/static/ is committed
+node_modules/
+web/.vite/
+web/coverage/
+*.tsbuildinfo
+
 # Virtual environments
 .venv/
 venv/

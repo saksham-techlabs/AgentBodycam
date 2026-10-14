@@ -35,6 +35,25 @@ python scripts/check.py
 This runs `ruff format --check`, `ruff check`, `mypy` (strict) and `pytest`.
 Use `python scripts/check.py --fix` to auto-format first.
 
+## Replay UI (`web/`)
+
+The Replay UI is a React + TypeScript + Vite app. Node.js 20+ is needed only to work on
+it; users of AgentBodycam never need Node because the production build is committed to
+`src/agentbodycam/ui/static/` and shipped in the Python package.
+
+```bash
+cd web
+npm ci
+npm run typecheck
+npm run test
+npm run build      # rewrites src/agentbodycam/ui/static/
+```
+
+After any change in `web/`, run `npm run build` and commit the regenerated
+`src/agentbodycam/ui/static/` together with the source change. Keep the UI compatible with
+its Content Security Policy: no inline scripts or styles in `index.html`, no `eval`, no
+remote fonts, CDNs or analytics, and never store the API token anywhere but in memory.
+
 ## Commits
 
 Use [Conventional Commits](https://www.conventionalcommits.org/) style messages,

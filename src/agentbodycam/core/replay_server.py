@@ -26,6 +26,24 @@ Security model:
 - **Strict parsing.** Paths are never percent-decoded and never mapped to files: a session
   segment must match the session-ID pattern exactly, so ``..``, ``%2e%2e`` or encoded
   separators cannot reach the file system. Timeline parameters are strictly validated.
+
+Optional Replay UI (``ui=``, used by ``agentbodycam replay``; ``replay-api`` serves none):
+
+- **Same origin.** The packaged UI build (:mod:`agentbodycam.core.ui_assets`) is served from
+  this server's own origin: the UI document for ``/`` and ``/session/<session-id>``, and
+  the known build files by exact path from an in-memory allowlist. Nothing else outside
+  ``/api/`` exists. The document gets its own strict CSP (same-origin scripts, styles and
+  fetches only; no inline script, no eval, no framing); every other response keeps the API
+  headers above unchanged.
+- **Token handoff.** ``GET /ui/bootstrap`` returns this instance's token as JSON, only to a
+  same-origin ``fetch()`` from the UI page: it requires ``X-AgentBodycam-UI: bootstrap``
+  (a cross-origin page cannot send it without a CORS preflight, which is never approved)
+  and browser fetch metadata (``Sec-Fetch-Site: same-origin``, ``Sec-Fetch-Mode:
+  cors|same-origin``, ``Sec-Fetch-Dest: empty``), so other web sites, frames and plain
+  navigations are refused. The page keeps the token in memory; it never appears in a URL,
+  file, cookie, browser storage or log. Local programs can imitate these headers, so with
+  the UI enabled the token no longer keeps out other local programs that can reach the
+  loopback port (see SECURITY.md).
 """
 
 from __future__ import annotations
@@ -43,8 +61,10 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import cast
 
 from agentbodycam.core.replay import ReplayError, ReplayErrorCode, ReplayService
+from agentbodycam.core.ui_assets import UiAsset, UiBundle
 from agentbodycam.models.events import JsonObject
-from agentbodycam.models.replay import PRODUCT_NAME, health
+from agentbodycam.models.replay import PRODUCT_NAME, REPLAY_API_VERSION, health
+from agentbodycam.models.session import SESSION_ID_PATTERN
 
 DEFAULT_HOST = "127.0.0.1"
 DEFAULT_PORT = 0  # the operating system picks a free ephemeral port
@@ -54,6 +74,11 @@ REQUEST_TIMEOUT_SECONDS = 10.0
 MAX_QUERY_INTEGER_DIGITS = 18
 MAX_DISCARDED_BODY_BYTES = 64 * 1024
 API_PREFIX = "/api/"
+UI_BOOTSTRAP_PATH = "/ui/bootstrap"
+UI_BOOTSTRAP_HEADER = "X-AgentBodycam-UI"
+UI_BOOTSTRAP_HEADER_VALUE = "bootstrap"
+JSON_CONTENT_TYPE = "application/json; charset=utf-8"
+_UI_SESSION_ROUTE = re.compile(r"^/session/([^/]+)$")
 
 _LOOPBACK = {"127.0.0.1": "127.0.0.1", "localhost": "127.0.0.1", "::1": "::1"}
 _INTEGER = re.compile(rf"^-?[0-9]{{1,{MAX_QUERY_INTEGER_DIGITS}}}$")
@@ -67,6 +92,24 @@ _SECURITY_HEADERS = (
     ("Content-Security-Policy", "default-src 'none'; frame-ancestors 'none'; sandbox"),
     ("Cross-Origin-Resource-Policy", "same-origin"),
     ("Referrer-Policy", "no-referrer"),
+)
+
+# Only the UI document runs anything: same-origin script, style, image, font and fetch;
+# no inline script or style markup, no eval, no plugins, no forms, no framing, no <base>.
+UI_CONTENT_SECURITY_POLICY = (
+    "default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; "
+    "font-src 'self'; connect-src 'self'; manifest-src 'self'; object-src 'none'; "
+    "base-uri 'none'; form-action 'none'; frame-ancestors 'none'"
+)
+_UI_DOCUMENT_HEADERS = (
+    ("Cache-Control", "no-store"),
+    ("X-Content-Type-Options", "nosniff"),
+    ("X-Frame-Options", "DENY"),
+    ("Content-Security-Policy", UI_CONTENT_SECURITY_POLICY),
+    ("Cross-Origin-Opener-Policy", "same-origin"),
+    ("Cross-Origin-Resource-Policy", "same-origin"),
+    ("Referrer-Policy", "no-referrer"),
+    ("Permissions-Policy", "camera=(), microphone=(), geolocation=(), usb=(), payment=()"),
 )
 
 _STATUS_BY_CODE = {
@@ -119,6 +162,14 @@ class _Response:
     body: JsonObject
     headers: tuple[tuple[str, str], ...] = ()
     route: str = "(unmatched)"
+    # A UI document or asset instead of JSON: its bytes, type and security headers.
+    raw: UiAsset | None = None
+    security: tuple[tuple[str, str], ...] = _SECURITY_HEADERS
+
+
+def _ui_response(asset: UiAsset, route: str, *, document: bool) -> _Response:
+    security = _UI_DOCUMENT_HEADERS if document else _SECURITY_HEADERS
+    return _Response(200, {}, route=route, raw=asset, security=security)
 
 
 def _error(
@@ -172,6 +223,7 @@ class _Config:
     allowed_hosts: frozenset[str]
     allowed_origins: frozenset[str]
     log: Callable[[str], None] | None
+    ui: UiBundle | None = None
     log_lock: threading.Lock = field(default_factory=threading.Lock)
 
 
@@ -237,11 +289,14 @@ class _Handler(BaseHTTPRequestHandler):
     # -- output --------------------------------------------------------------------------
 
     def _send(self, response: _Response) -> None:
-        body = _json_bytes(response.body)
+        if response.raw is None:
+            body, content_type = _json_bytes(response.body), JSON_CONTENT_TYPE
+        else:
+            body, content_type = response.raw.body, response.raw.content_type
         self.send_response(response.status)
-        self.send_header("Content-Type", "application/json; charset=utf-8")
+        self.send_header("Content-Type", content_type)
         self.send_header("Content-Length", str(len(body)))
-        for name, value in _SECURITY_HEADERS + response.headers:
+        for name, value in response.security + response.headers:
             self.send_header(name, value)
         self.end_headers()
         if self.command != "HEAD":
@@ -334,7 +389,8 @@ class _Handler(BaseHTTPRequestHandler):
             return _Response(200, health(), route=route)
 
         if not path.startswith(API_PREFIX):
-            return _protocol_error(404)
+            ui = self._config.ui
+            return _protocol_error(404) if ui is None else self._ui_route(ui, path, query_text)
         if not self._authorized():
             return _error(
                 401,
@@ -384,11 +440,60 @@ class _Handler(BaseHTTPRequestHandler):
         except ReplayError as exc:
             return _replay_error(exc, route)
 
+    # -- Replay UI -----------------------------------------------------------------------
+
+    def _ui_route(self, ui: UiBundle, path: str, query: str | None) -> _Response:
+        """UI document routes, the token bootstrap and known assets; nothing else."""
+        if path == UI_BOOTSTRAP_PATH:
+            return self._ui_bootstrap(query)
+        if path == "/":
+            route = "/"
+        elif (match := _UI_SESSION_ROUTE.fullmatch(path)) and SESSION_ID_PATTERN.fullmatch(
+            match.group(1)
+        ):
+            route = "/session/{session_id}"
+        else:
+            asset = ui.asset(path)
+            if asset is None:
+                return _protocol_error(404)
+            if query is not None:
+                return _error(400, "invalid_parameter", "UI files take no query parameters.")
+            return _ui_response(asset, "(ui asset)", document=False)
+        if query is not None:
+            return _error(400, "invalid_parameter", "UI pages take no query parameters.")
+        return _ui_response(ui.index, route, document=True)
+
+    def _ui_bootstrap(self, query: str | None) -> _Response:
+        """This instance's token, for a same-origin ``fetch()`` by the UI page only."""
+        route = UI_BOOTSTRAP_PATH
+        markers = self.headers.get_all(UI_BOOTSTRAP_HEADER) or []
+        site = self.headers.get_all("Sec-Fetch-Site") or []
+        mode = self.headers.get_all("Sec-Fetch-Mode") or []
+        dest = self.headers.get_all("Sec-Fetch-Dest") or []
+        if (
+            query is not None
+            or markers != [UI_BOOTSTRAP_HEADER_VALUE]
+            or site != ["same-origin"]
+            or mode not in (["cors"], ["same-origin"])
+            or dest != ["empty"]
+        ):
+            return _error(
+                403,
+                "bootstrap_not_allowed",
+                "UI access is only granted to the Replay UI page served by this server.",
+                route=route,
+            )
+        token = self._config.token.decode("ascii")
+        return _Response(200, {"api_version": REPLAY_API_VERSION, "token": token}, route=route)
+
 
 class ReplayServer:
     """The Replay API on a loopback address. Foreground use: ``start()`` then ``stop()``.
 
     ``token`` is generated here, per instance, and exists only in this object's memory.
+    With ``ui`` (the packaged UI build), the Replay UI is served from the same origin and
+    the UI page can obtain the token through ``/ui/bootstrap``; without it (the default),
+    no route outside ``/api/`` exists.
     """
 
     def __init__(
@@ -398,6 +503,7 @@ class ReplayServer:
         host: str = DEFAULT_HOST,
         port: int = DEFAULT_PORT,
         log: Callable[[str], None] | None = None,
+        ui: UiBundle | None = None,
     ) -> None:
         if not 0 <= port <= 65535:
             raise ValueError(f"port must be between 0 and 65535, got {port}")
@@ -413,6 +519,7 @@ class ReplayServer:
             allowed_hosts=frozenset(f"{name}:{self.port}" for name in names),
             allowed_origins=frozenset(f"http://{name}:{self.port}" for name in names),
             log=log,
+            ui=ui,
         )
         self._thread: threading.Thread | None = None
         self._closed = False

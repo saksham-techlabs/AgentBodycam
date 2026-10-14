@@ -8,10 +8,12 @@
 > (`agentbodycam record`), plus commands you explicitly launch through
 > `agentbodycam run -- <command>` and whether those that are tests, builds, lints or type
 > checks passed or failed, it can produce a deterministic local forensic report of a
-> recorded session (`agentbodycam analyze`), and it can serve recorded evidence through a
-> local, authenticated, read-only Replay API (`agentbodycam replay-api`). It does not
-> observe arbitrary terminal commands, does not integrate with any specific agent, and has
-> no replay UI, export or AI features yet. Expect breaking changes.
+> recorded session (`agentbodycam analyze`), it can serve recorded evidence through a
+> local, authenticated, read-only Replay API (`agentbodycam replay-api`), and it has an
+> early **preview** of the local Replay UI (`agentbodycam replay`: session dashboard and
+> session overview only). It does not observe arbitrary terminal commands, does not
+> integrate with any specific agent, and has no timeline replay, export or AI features yet.
+> Expect breaking changes.
 >
 > Implemented:
 > - file recording
@@ -19,9 +21,10 @@
 > - wrapped commands and deterministic check outcomes
 > - local deterministic forensic analysis
 > - local authenticated Replay API (loopback only, read-only)
+> - Replay UI foundation (under development: dashboard and session overview)
 >
 > Still not implemented:
-> - React replay UI
+> - Replay UI timeline, scrubbing, file and Git views, cinematic replay
 > - share/export (cards, video)
 > - agent-specific adapters
 > - optional AI analyst
@@ -63,14 +66,15 @@ It is designed to be:
 | Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
 | Local forensics engine (`analyze`) | Implemented (deterministic, read-only, observed findings only) |
 | Local Replay API (`replay-api`) | Implemented (loopback only, temporary bearer token, read-only, standard library only) |
-| Replay UI | Not started |
+| Replay UI (`replay`) | Under development: foundation only (session dashboard, session overview); no timeline yet |
 | Share/export | Not started |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
 | Optional AI analysis | Not started |
 
 No external API, account or network access is needed for anything that exists today, and
-AgentBodycam itself makes no outbound network requests. The Replay API only listens on the
-loopback interface for local clients (local IPC). (A command you wrap with
+AgentBodycam itself makes no outbound network requests. The Replay API and the Replay UI
+only listen on the loopback interface for local clients (local IPC); the UI loads no
+remote scripts, fonts or analytics. (A command you wrap with
 `agentbodycam run` is your own program and may of course use the network.)
 
 See [docs/product-scope.md](docs/product-scope.md) and
@@ -163,7 +167,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: agent integrations, a replay UI, export or AI.
+- Not yet: agent integrations, timeline replay, export or AI.
 
 ### Recording commands you run
 
@@ -345,10 +349,53 @@ network request. A session that is still being recorded can be analysed; the rep
 then marked `analysis_complete: false`. A session whose recorder crashed is reported as
 `ended_without_stop`.
 
-### Local Replay API (development; no Replay UI yet)
+### Replay UI (preview, under development)
 
-**This is a local development API. There is no Replay UI yet**; the API exists so the
-future UI (and your own scripts) can read recorded evidence.
+```text
+$ agentbodycam replay
+AgentBodycam Replay (UI preview)
+Project: C:\work\app
+Listening: http://127.0.0.1:54321
+Open in your browser: http://127.0.0.1:54321/
+The Replay UI is under development: session dashboard and overview only.
+Access is granted automatically to the page served at this address; the address contains no secret and nothing is stored in your browser.
+Read-only, loopback only.
+Press Ctrl+C to stop.
+```
+
+Open the printed address in your browser. The UI is served by AgentBodycam itself from the
+same loopback origin as the Replay API (no separate frontend server, no Node.js needed at
+run time). Today it shows:
+
+- the connection and server status;
+- a project summary (session count; never the project path) and the session list, with
+  each session's recording state: `STOPPED`, `LIVE`, `ENDED WITHOUT STOP` (the recorder
+  crashed or was killed), `UNKNOWN`, `NOT STARTED` or `UNREADABLE`;
+- a session overview (`/session/<id>`): recording state, start, end or "still recording",
+  event count, observable failures, observed recoveries, unresolved failures, warnings,
+  event counts per type and command/check totals.
+
+Refresh is manual; while a session is live its view refreshes every 2.5 s (paused while
+the browser tab is hidden). Timeline replay, scrubbing, file/diff and Git views, export and
+sharing are **not implemented yet**.
+
+How the page gets API access: the page asks its own server for the temporary token with a
+same-origin `fetch()` (`GET /ui/bootstrap`, which requires a custom header and browser
+fetch metadata, so other web sites, links, iframes and plain `curl` requests are refused).
+The token is kept in page memory only: never in the URL, `localStorage`,
+`sessionStorage`, cookies or on disk, and it is not printed by `replay`. Use `replay-api`
+instead if you want the API alone, without the token handoff (see
+[SECURITY.md](SECURITY.md#local-replay-ui-agentbodycam-replay)).
+
+```bash
+agentbodycam replay --project PATH     # serve another project's recordings
+agentbodycam replay --port 8765        # fixed port (default 0: any free port)
+```
+
+### Local Replay API (development)
+
+**This is a local development API** (JSON only); it exists so the Replay UI (and your own
+scripts) can read recorded evidence. `replay-api` serves no UI.
 
 ```text
 $ agentbodycam replay-api
@@ -358,7 +405,7 @@ Listening: http://127.0.0.1:54321
 Authentication: enabled (send `Authorization: Bearer <token>`)
 API token: 3q2-...
 The token is temporary: it is held in memory only and stops working when this server stops.
-Local development API (read-only, loopback only); no Replay UI yet.
+Local development API (read-only, loopback only, JSON only). For the Replay UI, run `agentbodycam replay`.
 Press Ctrl+C to stop.
 ```
 
@@ -386,7 +433,7 @@ curl -H "Authorization: Bearer <token>" http://127.0.0.1:54321/api/v1/sessions
 - **Read-only**: GET and HEAD only (everything else is `405`); nothing is written, no Git
   or other process is run, and starting it creates nothing in the project.
 - **No CORS**: other web sites cannot read it; cross-origin and foreign-`Host` requests are
-  refused. The future UI will be served from the same local origin.
+  refused. The Replay UI is served from the same local origin.
 - No raw event payloads, absolute project paths, host/user names, environment, file
   contents or command output are returned. See [SECURITY.md](SECURITY.md#local-replay-api-agentbodycam-replay-api)
   and [the API reference](docs/architecture.md#35-replay-api-implemented).
@@ -434,6 +481,20 @@ python -m ruff format --check .
 python -m ruff check .
 python -m mypy
 python -m pytest
+```
+
+The Replay UI source lives in `web/` (React + TypeScript + Vite; Node.js 20+ is needed only
+to work on it). Its production build is committed to `src/agentbodycam/ui/static/` and
+shipped inside the Python package:
+
+```bash
+cd web
+npm ci
+npm run typecheck
+npm run test
+npm run build      # typechecks, then writes src/agentbodycam/ui/static/
+npm run dev        # Vite dev server; proxies /api and /ui/bootstrap to a running
+                   # `agentbodycam replay --port 8765` (override: AGENTBODYCAM_DEV_API)
 ```
 
 See [CONTRIBUTING.md](CONTRIBUTING.md).

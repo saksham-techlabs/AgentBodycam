@@ -34,7 +34,7 @@ def test_version_flag(capsys: pytest.CaptureFixture[str]) -> None:
 
 def test_unknown_command_fails(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as exc:
-        main(["replay"])
+        main(["teleport"])
     assert exc.value.code == 2
     assert "invalid choice" in capsys.readouterr().err
 

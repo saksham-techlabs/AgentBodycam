@@ -9,6 +9,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Replay UI foundation (under development): `agentbodycam replay [--project DIR]
+  [--host 127.0.0.1|::1|localhost] [--port N]` serves a React/TypeScript UI (source in
+  `web/`, Vite build committed to `src/agentbodycam/ui/static/` and shipped in the wheel;
+  Node.js is build-time only) from the same loopback origin as the unchanged Replay API.
+  App shell, connection/server status, session dashboard (project session count, state
+  summary, session list with STOPPED / LIVE / ENDED WITHOUT STOP / UNKNOWN / NOT STARTED /
+  UNREADABLE states) and session overview (`/session/<id>`: recording state, times, event
+  count, failures, recoveries, unresolved failures, warnings, event and command counts).
+  Typed, runtime-validated, GET-only API client with abort and error handling; manual
+  refresh plus 2.5 s polling of live sessions (paused while the tab is hidden).
+  Static files come from an in-memory allowlist loaded at startup (`core/ui_assets.py`);
+  request paths are never mapped to the file system. The document has its own strict CSP
+  (`script-src 'self'`, no `unsafe-inline`/`unsafe-eval`, no remote sources); the API CSP
+  is unchanged. The page receives the temporary token from `GET /ui/bootstrap` (custom
+  header plus same-origin fetch metadata required; no CORS) and keeps it in memory only;
+  `replay` does not print it. Timeline, scrubbing, detailed views and export are not
+  implemented.
+- `hatchling` in the `dev` extra (the tests build and inspect a real wheel).
 - Local, authenticated, read-only Replay API: `agentbodycam replay-api [--project DIR]
   [--host 127.0.0.1|::1|localhost] [--port N]` (standard library `ThreadingHTTPServer`, no
   new dependencies). Transport-independent `ReplayService` (`core/replay.py`) over
@@ -126,6 +144,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- `replay-api` stays API-only (no UI routes, no token bootstrap); its banner points to
+  `agentbodycam replay` for the UI. SECURITY.md documents the UI's threat model, including
+  the weaker protection against other local users while `replay` is running.
 - SECURITY.md describes what is recorded accurately (metadata such as paths, hashes, Git
   state and redacted arguments; never file contents, diffs or command output) and
   documents the Replay API's security model. The no-network test now separates

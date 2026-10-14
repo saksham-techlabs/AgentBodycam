@@ -10,8 +10,11 @@
 > "Wrapped commands") with deterministic check results (`check.passed` / `check.failed`,
 > section 3.1, "Check results"), the deterministic local forensics engine
 > (`agentbodycam analyze`, section 3.4) and the local, authenticated, read-only Replay API
-> (`agentbodycam replay-api`, section 3.5). Capture of commands not launched through
-> `agentbodycam run`, adapters, the replay UI, export and AI are not implemented.
+> (`agentbodycam replay-api`, section 3.5). The Replay UI is **under development**: only
+> its foundation exists (`agentbodycam replay`, section 3.6: app shell, connection status,
+> session dashboard and session overview). Capture of commands not launched through
+> `agentbodycam run`, adapters, the replay timeline and detailed views, export and AI are
+> not implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -924,7 +927,7 @@ agentbodycam replay-api [--project DIR] [--host 127.0.0.1|::1|localhost] [--port
         -> EventStore reads + analyze_session()      (no second analysis)
         -> ReplayService                             (read-only queries, typed results)
         -> ReplayServer (http.server, loopback)      (auth, browser checks, JSON)
-        -> React/TypeScript Replay UI (section 3.6, not implemented)
+        -> React/TypeScript Replay UI (section 3.6, foundation only)
 ```
 
 **Thin layer.** `ReplayService` has `project()`, `list_sessions()`, `session_detail(id)`,
@@ -944,7 +947,7 @@ are never passed on). The HTTP layer only parses, authenticates, routes and seri
 |---|---|
 | Binding | `127.0.0.1` by default; `::1` and `localhost` (bound as `127.0.0.1`, no DNS lookup) allowed; `0.0.0.0`, `::`, LAN IPs and names refused (`BindAddressError`, CLI exit 2). Port 0 by default. On Windows the socket uses `SO_EXCLUSIVEADDRUSE`; `HTTPServer`'s `getfqdn()` reverse lookup is skipped. |
 | Authentication | `secrets.token_urlsafe(32)` per server instance, memory only, printed once at startup; `Authorization: Bearer <token>` (scheme case-insensitive, exactly one header) compared with `secrets.compare_digest`. Required on every `/api/*` route except `/api/v1/health`. Query-string tokens are unknown parameters (400 when authenticated, 401 otherwise). |
-| Browsers | No CORS at all: no `Access-Control-*` header on any response, OPTIONS is 405. A foreign `Origin`, `Origin: null`, or `Sec-Fetch-Site: cross-site|same-site` gets 403 `origin_not_allowed`; a `Host` header other than `127.0.0.1:<port>` / `localhost:<port>` (`[::1]:<port>` for IPv6) gets 403 `host_not_allowed` (DNS rebinding). The future UI should be served by AgentBodycam from this same origin, so CORS is never needed. |
+| Browsers | No CORS at all: no `Access-Control-*` header on any response, OPTIONS is 405. A foreign `Origin`, `Origin: null`, or `Sec-Fetch-Site: cross-site|same-site` gets 403 `origin_not_allowed`; a `Host` header other than `127.0.0.1:<port>` / `localhost:<port>` (`[::1]:<port>` for IPv6) gets 403 `host_not_allowed` (DNS rebinding). The Replay UI is served by AgentBodycam from this same origin (section 3.6), so CORS is never needed. |
 | Headers | `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`, `Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`, `Server: AgentBodycam` (no Python version). |
 | Methods | GET and HEAD only. POST, PUT, PATCH, DELETE, OPTIONS, TRACE, CONNECT and unknown methods get 405 with `Allow: GET, HEAD`; their bodies are drained (up to 64 KiB) but never parsed. |
 | Paths | The request target is never percent-decoded and never mapped to a file. Routes are matched on exact raw segments; a session segment must match the session-ID pattern (`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$`) or the request gets 400 `invalid_session_id`, so `..`, `%2e%2e`, `%2f`, `%5c` cannot reach the file system. |
@@ -997,7 +1000,7 @@ none are 400 `invalid_parameter`.
 |---|---|
 | 400 | `bad_request`, `invalid_session_id`, `invalid_parameter` |
 | 401 | `unauthorized` (with `WWW-Authenticate: Bearer realm="agentbodycam"`) |
-| 403 | `origin_not_allowed`, `host_not_allowed` |
+| 403 | `origin_not_allowed`, `host_not_allowed`, `bootstrap_not_allowed` (UI server only, section 3.6) |
 | 404 | `not_found` (route), `session_not_found` |
 | 405 | `method_not_allowed` |
 | 500 | `session_unreadable` (corrupt session), `store_unsafe` (symlinked/junctioned store), `internal_error` |
@@ -1020,13 +1023,108 @@ request without a cap, acceptable on loopback. HTTP/1.0 responses (one request p
 connection). The token is printed to the terminal that started the server; anyone who can
 read that terminal or run code as the same user can use it.
 
-### 3.6 React/TypeScript Replay UI
+### 3.6 React/TypeScript Replay UI (under development: foundation only)
 
-- Separate frontend package, added in a later task.
-- Timeline scrubbing, file/diff views, failure markers, "cinematic" replay of the session.
-- Consumes only the Replay API, preferably served by AgentBodycam from the API's own
-  loopback origin so that no CORS policy is ever needed.
-- Must clearly style facts and inferences differently (see section 2).
+Code: `web/` (React 19, TypeScript, Vite; Node.js is a build-time tool only), built into
+`src/agentbodycam/ui/static/` (committed and shipped in the wheel), loaded by
+`core/ui_assets.py` and served by `core/replay_server.py`. CLI:
+
+```text
+agentbodycam replay [--project DIR] [--host 127.0.0.1|::1|localhost] [--port N]
+```
+
+```text
+browser page (same loopback origin)
+    GET /                      -> packaged index.html (UI CSP)
+    GET /assets/<hashed file>  -> packaged JS/CSS (API headers)
+    fetch GET /ui/bootstrap    -> {"api_version": 1, "token": ...}   (memory only)
+    fetch GET /api/v1/...      -> unchanged Replay API, Authorization: Bearer <token>
+```
+
+**Implemented (10A).** App shell with sidebar navigation and connection/server status
+(connecting, online, unreachable, access expired, refused; API version; loopback host);
+session dashboard (project summary as a session count, never the path; state summary;
+session list, newest first, unreadable sessions shown but not openable); session overview
+at `/session/<id>` (recording state, started, ended or live, duration, event count,
+observable failures, observed recoveries, unresolved failures, warnings, per-type event
+counts, command/check totals). Visual states map the API's `recording_state`:
+`stopped` -> STOPPED, `recording` -> LIVE, `ended_without_stop` -> ENDED WITHOUT STOP,
+`unknown` -> UNKNOWN, `not_started` -> NOT STARTED, `readable: false` -> UNREADABLE.
+Colour language: green pass/recovered, red failed, amber warning/incomplete, blue neutral
+evidence. Manual refresh; while a session is live the visible view polls every 2.5 s
+(setTimeout chain, never overlapping, paused while `document.hidden`, stopped on unmount
+or session change). No WebSockets or SSE. Routing uses the History API; the session ID
+in `/session/<id>` is validated against the session-ID pattern on both sides.
+
+**Not implemented yet.** Timeline, scrubbing, findings/file/Git/final-state views,
+diff viewer, cinematic replay, export. The overview tabs for them are visibly disabled.
+
+**API client** (`web/src/api/`). GET only, `cache: "no-store"`, `credentials:
+"same-origin"`, `redirect: "error"`, `referrerPolicy: "no-referrer"`, an `AbortSignal` per
+request (requests are aborted on unmount and on route change). Responses are validated at
+runtime against types that mirror `models/replay.py` exactly (`ProjectSummary`,
+`SessionSummary`, `SessionsResponse`, `SessionDetail`, `ApiError`); an unexpected shape is
+an `invalid_response` error rather than undefined behaviour. 400/401/403/404/500 and
+network failures become typed `ApiError` kinds with fixed user-facing messages (backend
+messages are not rendered). On a 401 the client re-bootstraps once and retries.
+
+**Static serving** (`core/ui_assets.py`). `load_ui_bundle()` reads the packaged `static/`
+directory once at startup (through `importlib.resources`, so zipped installs work) into an
+immutable in-memory table: `index.html` plus top-level and `assets/` files whose names match
+`^[A-Za-z0-9][A-Za-z0-9_-]*(\.[A-Za-z0-9_-]+)+$` and whose suffix is in a fixed MIME map
+(`.js`, `.css`, `.svg`, `.png`, `.ico`, `.webp`, `.woff2`; HTML only for the document).
+Symlinks and Windows reparse points are skipped; at most 256 files, 8 MiB each, 32 MiB in
+total. At request time the raw path is looked up in that table; nothing is decoded,
+normalised or opened. Routes on a UI server:
+
+| Path | Response |
+|---|---|
+| `/`, `/session/<valid-session-id>` | `index.html`, UI document headers (query string: 400) |
+| an exact packaged asset path (e.g. `/assets/index-<hash>.js`, `/favicon.svg`) | the asset with its MIME type and the API headers (query string: 400) |
+| `/ui/bootstrap` | token handoff (below) |
+| `/api/...` | the unchanged Replay API (byte- and header-identical to `replay-api`) |
+| anything else (`/index.html`, `/session/x`, traversal, project or `.agentbodycam` paths) | 404 JSON |
+
+`replay-api` constructs the server without a bundle, so none of these UI routes exist there.
+
+**UI CSP** (document only; the API CSP is unchanged): `default-src 'none'; script-src
+'self'; style-src 'self'; img-src 'self'; font-src 'self'; connect-src 'self';
+manifest-src 'self'; object-src 'none'; base-uri 'none'; form-action 'none';
+frame-ancestors 'none'`. No `unsafe-inline` or `unsafe-eval`: the Vite build emits only
+external module scripts and one stylesheet (no module-preload polyfill, no inlined assets),
+and React's `style` props are applied through the CSSOM, which `style-src` does not
+restrict. No fonts, CDNs or analytics are loaded (system font stack). Other document
+headers: `no-store`, `nosniff`, `X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy:
+same-origin`, `Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`,
+`Permissions-Policy`.
+
+**Token bootstrap.** `GET /ui/bootstrap` returns `{"api_version": 1, "token": "<token>"}`
+with the API headers only if every check passes, else 403 `bootstrap_not_allowed`:
+exactly one `X-AgentBodycam-UI: bootstrap`, `Sec-Fetch-Site: same-origin`,
+`Sec-Fetch-Mode: cors|same-origin`, `Sec-Fetch-Dest: empty`, no query string, plus the
+usual `Host`/`Origin` checks. The custom header forces a CORS preflight for any
+cross-origin caller, which is never approved; the fetch-metadata requirements exclude
+navigations, frames, subresource tags and clients that do not send them. The page holds
+the token in a private class field only (never URL, Web Storage, cookies or logs); the
+token is never part of any `/api` response and `replay` does not print it.
+
+Threat model: other web origins cannot get the token. Same-user programs could already
+read `.agentbodycam/`. Other local users or programs that can reach the loopback port and
+forge these headers *can* obtain the token while `replay` runs; this is weaker than
+`replay-api`, whose token is visible only in the starting terminal, and is documented in
+SECURITY.md. `replay-api` remains available for that stronger guarantee.
+
+**Development.** `npm run dev` in `web/` starts Vite (development only) and proxies
+`/api/` and `/ui/bootstrap` to `AGENTBODYCAM_DEV_API` (default `http://127.0.0.1:8765`,
+run `agentbodycam replay --port 8765`), rewriting `Host` and dropping `Origin` so the
+server's checks pass. `npm run build` typechecks and writes `src/agentbodycam/ui/static/`;
+the build output is committed so that end users never need Node.js. Tests: Vitest +
+Testing Library (`npm run test`) against a fake server that mirrors the real routes, and
+`tests/test_replay_ui.py` for serving, headers, path safety, bootstrap, the CLI and
+wheel packaging.
+
+Still to come: the timeline and scrubbing, file/diff views, failure markers, the
+"cinematic" replay, and clearly different styling of facts and inferences (section 2).
 
 ### 3.7 Share / export pipeline
 
@@ -1050,14 +1148,16 @@ src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
   cli.py           argparse CLI (help, version, doctor, session create/list/show/active,
-                   record, run, analyze, replay-api)
+                   record, run, analyze, replay-api, replay)
   core/            application logic (doctor, filelock, store, active, ignore, scanner,
                    git_observer, recorder, command, redact, checks, forensics, replay,
-                   replay_server)
+                   replay_server, ui_assets)
   models/          typed dataclasses shared across layers (environment, events, session,
                    forensics, replay)
+  ui/static/       the built Replay UI (generated by `npm run build` in web/; committed)
   utils/           small dependency-free helpers (today: Git detection and the bounded,
                    shell-free read-only Git command runner)
+web/               Replay UI source (React + TypeScript + Vite); not part of the package
 ```
 
 The CLI is built on the standard library `argparse` to keep the runtime dependency

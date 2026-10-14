@@ -23,7 +23,7 @@ project commits to:
 ## What is stored today
 
 `agentbodycam session create`, `agentbodycam record` and `agentbodycam run` write only
-inside `<project>/.agentbodycam/` (`analyze` and `replay-api` write nothing):
+inside `<project>/.agentbodycam/` (`analyze`, `replay-api` and `replay` write nothing):
 
 - `.gitignore` containing `*`, so session data is not committed by accident.
 - `sessions/<id>/session.json`: session ID, absolute project path, start/end time, status,
@@ -95,13 +95,13 @@ operation, an error kind, the exit code and the first line of Git's error messag
 
 The project path can include your username (for example `C:\Users\<name>\...`); keep this
 in mind before sharing a session directory. No AgentBodycam code makes outbound network
-requests; the only socket it ever opens is the loopback listener of the Replay API below.
+requests; the only socket it ever opens is the loopback listener of the Replay API and
+Replay UI below.
 
 ## Local Replay API (`agentbodycam replay-api`)
 
-A small, read-only HTTP/JSON API for the future Replay UI. It is a local development API;
-there is no Replay UI yet. Communication with it is **local IPC over the loopback
-interface**, not network access:
+A small, read-only HTTP/JSON API for the Replay UI. It is a local development API.
+Communication with it is **local IPC over the loopback interface**, not network access:
 
 - **Loopback only.** It binds `127.0.0.1` by default (`::1` or `localhost`, which is bound
   as `127.0.0.1` without a DNS lookup, can be chosen). `0.0.0.0`, `::`, LAN addresses and
@@ -125,8 +125,8 @@ interface**, not network access:
   header other than this server's loopback address and port (DNS rebinding) are refused
   with `403`. Every response is JSON with `Cache-Control: no-store`,
   `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, a restrictive
-  `Content-Security-Policy` and `Cross-Origin-Resource-Policy: same-origin`. The future UI
-  is meant to be served from this same local origin, so CORS will not be needed.
+  `Content-Security-Policy` and `Cross-Origin-Resource-Policy: same-origin`. The Replay UI
+  is served from this same local origin, so CORS is not needed.
 - **What it returns.** Session IDs, status, times and event counts; the same forensic
   report as `agentbodycam analyze --json`; and a paginated timeline of the report's safe
   per-event view (sequence, ID, time, type, category, source, summary, project-relative
@@ -141,6 +141,68 @@ interface**, not network access:
   cannot protect against programs running as your own user account, which can read
   `.agentbodycam/` directly anyway. Data leaves your machine only if you deliberately share
   it.
+
+## Local Replay UI (`agentbodycam replay`)
+
+The Replay UI (a preview, under development) is a React application whose production build
+ships inside the Python package (`agentbodycam/ui/static/`). `agentbodycam replay` serves
+it, together with exactly the same Replay API, from one loopback origin. Node.js is used
+only to build it; nothing is fetched at run time. `replay-api` serves no UI at all.
+
+**Static files.** At startup the server loads a fixed allowlist from the packaged build
+directory into memory: `index.html`, plus top-level and `assets/` files with simple names
+and an allowed type (`.js`, `.css`, `.svg`, `.png`, `.ico`, `.webp`, `.woff2`). Symlinks
+and Windows reparse points are skipped, and sizes and counts are bounded. Requests are
+matched against that table by exact raw path; a request path is never mapped to the file
+system, never percent-decoded and never normalised, so `..`, `%2e%2e`, `%2f`, `%5c`,
+absolute paths, project files and `.agentbodycam/` files cannot be reached (404). The
+document is served only for `/` and `/session/<valid-session-id>`. Query strings on UI
+routes are refused. Assets keep the API's headers (`nosniff`, `no-store`, the API CSP,
+`Cross-Origin-Resource-Policy: same-origin`).
+
+**Content Security Policy.** The UI document gets its own policy, and the API policy is
+unchanged:
+`default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self'; font-src 'self';
+connect-src 'self'; manifest-src 'self'; object-src 'none'; base-uri 'none';
+form-action 'none'; frame-ancestors 'none'`. There is no `unsafe-inline`, `unsafe-eval`,
+`data:`, `blob:` or remote source. The build contains no inline script or style, and the
+UI uses no external CDN, web fonts or analytics. The document also gets
+`X-Frame-Options: DENY`, `Cross-Origin-Opener-Policy: same-origin`,
+`Referrer-Policy: no-referrer` and a restrictive `Permissions-Policy`.
+
+**Token handoff.** `replay` does not print the token. The page obtains it from
+`GET /ui/bootstrap`, which answers `{"api_version": 1, "token": "..."}` only when the
+request:
+
+- carries `X-AgentBodycam-UI: bootstrap` (a custom header, so a cross-origin page would
+  need a CORS preflight, which is never approved: OPTIONS is 405 and no
+  `Access-Control-*` header exists);
+- carries the browser's fetch metadata for a same-origin script fetch
+  (`Sec-Fetch-Site: same-origin`, `Sec-Fetch-Mode: cors` or `same-origin`,
+  `Sec-Fetch-Dest: empty`), so links, navigations, iframes, `<script>`/`<img>` tags and
+  tools that send no such headers (such as plain `curl`) are refused with 403;
+- passes the API's `Host` (DNS rebinding) and `Origin` checks; each header must appear
+  exactly once, and a query string is refused.
+
+The page keeps the token in a private field of its API client, in memory only. It is never
+placed in a URL or query string, `localStorage`, `sessionStorage`, IndexedDB or cookies,
+never logged, never written to disk, and is not returned by any `/api` route. Reloading the
+page fetches it again; it stops working when the server stops. Bearer authentication on
+`/api` routes is unchanged.
+
+**Threat model.**
+
+- *Other web sites* in your browser cannot obtain the token or read API responses: the
+  bootstrap needs a custom header plus same-origin fetch metadata, there is no CORS, and
+  foreign `Origin`/`Host` headers (including DNS rebinding) are refused.
+- *Programs running as your own user* can already read `.agentbodycam/` directly; the UI
+  does not change that.
+- *Other local users or programs that can connect to the loopback port* are the trade-off.
+  Unlike `replay-api` (whose token appears only in your terminal), anyone who can reach the
+  port and deliberately forge the request headers above can obtain the token while
+  `replay` is running. Only use `replay` on a machine where you trust the other local
+  accounts, or use `replay-api`, which offers no bootstrap. The server never listens
+  beyond loopback, so other machines cannot reach it.
 
 ## Reporting a vulnerability
 

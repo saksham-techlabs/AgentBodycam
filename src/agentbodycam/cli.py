@@ -4,8 +4,9 @@ Implemented: environment check, session-store commands (including the read-only
 ``session active``), the polling recorder (file changes and read-only Git state; one
 recorder per project), explicit wrapped-command capture (``run -- <command>``) and
 deterministic check results for wrapped commands (``run --check KIND -- <command>``),
-read-only deterministic forensic analysis of a recorded session (``analyze``) and the
-local, authenticated, read-only Replay API (``replay-api``). There is no replay UI yet.
+read-only deterministic forensic analysis of a recorded session (``analyze``), the local,
+authenticated, read-only Replay API (``replay-api``) and the foundation of the local Replay
+UI served from the same loopback origin (``replay``; under development).
 """
 
 from __future__ import annotations
@@ -49,6 +50,7 @@ from agentbodycam.core.replay_server import (
     resolve_bind_host,
 )
 from agentbodycam.core.store import EventStore, StoreError
+from agentbodycam.core.ui_assets import UiBundle, UiUnavailableError, load_ui_bundle
 from agentbodycam.models.events import Event, EventSource, EventType, EventValidationError
 from agentbodycam.models.forensics import (
     ChangeWindow,
@@ -120,8 +122,9 @@ def build_parser() -> argparse.ArgumentParser:
             "plus commands explicitly launched with `agentbodycam run -- ...` and their "
             "test/build/lint/typecheck results, and a deterministic, read-only forensic "
             "report of a recorded session (`agentbodycam analyze`), served locally by a "
-            "read-only, authenticated Replay API (`agentbodycam replay-api`; no UI yet). "
-            "Other terminal commands and agent internals are not captured."
+            "read-only, authenticated Replay API (`agentbodycam replay-api`) and browsable "
+            "in an early local Replay UI (`agentbodycam replay`; session dashboard and "
+            "overview only). Other terminal commands and agent internals are not captured."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -275,11 +278,12 @@ def build_parser() -> argparse.ArgumentParser:
     replay_api = subparsers.add_parser(
         "replay-api",
         parents=[project],
-        help="Serve the local, read-only Replay API (development; no Replay UI yet).",
+        help="Serve the local, read-only Replay API only (JSON; no UI).",
         description=(
             "Serve recorded sessions, their forensic reports and paginated timelines as "
-            "JSON on a loopback address, for the future Replay UI. Runs in the foreground "
-            "until Ctrl+C.\n\n"
+            "JSON on a loopback address, for scripts and UI development. Runs in the "
+            "foreground until Ctrl+C. (`agentbodycam replay` serves the same API together "
+            "with the Replay UI.)\n\n"
             "Security: listens on 127.0.0.1 (or ::1 / localhost) only; public and LAN "
             "addresses are refused. A new random API token is printed at startup; it is "
             "held in memory only and stops working when the server stops. Every data "
@@ -301,6 +305,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Loopback address to listen on: 127.0.0.1 (default), ::1 or localhost.",
     )
     replay_api.add_argument(
+        "--port",
+        type=_port,
+        default=DEFAULT_PORT,
+        metavar="PORT",
+        help="Port to listen on (default: 0, a free port chosen by the operating system).",
+    )
+
+    replay = subparsers.add_parser(
+        "replay",
+        parents=[project],
+        help="Open the local Replay UI (under development: session dashboard and overview).",
+        description=(
+            "Serve the Replay UI and the Replay API from one loopback address, then open the "
+            "printed address in your browser. Runs in the foreground until Ctrl+C. The UI "
+            "is under development: it lists recorded sessions and shows a session overview; "
+            "the replay timeline and detailed findings are not built yet.\n\n"
+            "Security: listens on 127.0.0.1 (or ::1 / localhost) only. The UI ships inside "
+            "the package (no Node.js needed) and is served from the API's own origin, so no "
+            "CORS is involved. A new random API token is created at startup, held in memory "
+            "only and not printed: the UI page served at this address receives it directly "
+            "from the server, never through the URL, and keeps it in memory only. Other web "
+            "sites cannot obtain it. Any program on this computer that can reach the "
+            "loopback port could, so use `replay-api` on shared multi-user machines. "
+            "Read-only: nothing is written, no Git or other process is run and no outbound "
+            "network request is made."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    replay.add_argument(
+        "--host",
+        type=_loopback_host,
+        default=DEFAULT_HOST,
+        metavar="HOST",
+        help="Loopback address to listen on: 127.0.0.1 (default), ::1 or localhost.",
+    )
+    replay.add_argument(
         "--port",
         type=_port,
         default=DEFAULT_PORT,
@@ -717,6 +757,35 @@ def _run_replay_api(
     err: TextIO,
     stop: threading.Event | None = None,
 ) -> int:
+    return _serve_replay(args, out, err, stop, ui=None)
+
+
+def _run_replay(
+    args: argparse.Namespace,
+    out: TextIO,
+    err: TextIO,
+    stop: threading.Event | None = None,
+) -> int:
+    try:
+        ui = load_ui_bundle()
+    except (UiUnavailableError, OSError):
+        err.write(
+            "error: the Replay UI files are missing from this AgentBodycam installation; "
+            "reinstall AgentBodycam (or, in a source checkout, run `npm run build` in web/). "
+            "`agentbodycam replay-api` still serves the JSON API.\n"
+        )
+        return 1
+    return _serve_replay(args, out, err, stop, ui=ui)
+
+
+def _serve_replay(
+    args: argparse.Namespace,
+    out: TextIO,
+    err: TextIO,
+    stop: threading.Event | None,
+    *,
+    ui: UiBundle | None,
+) -> int:
     project: Path = args.project if args.project is not None else Path.cwd()
     if not project.is_dir():
         err.write("error: the project directory does not exist or is not a directory\n")
@@ -736,6 +805,7 @@ def _run_replay_api(
             host=args.host,
             port=args.port,
             log=lambda line: _write(out, f"  {line}\n"),
+            ui=ui,
         )
     except BindAddressError as exc:
         err.write(f"error: {exc}\n")
@@ -743,27 +813,42 @@ def _run_replay_api(
     except OSError as exc:
         err.write(f"error: could not listen on {args.host} port {args.port}: {exc.strerror}\n")
         return 1
+    if ui is None:
+        banner = (
+            "AgentBodycam Replay API\n"
+            f"Project: {_display(str(project.resolve()))}\n"
+            f"Listening: {server.url}\n"
+            "Authentication: enabled (send `Authorization: Bearer <token>`)\n"
+            f"API token: {server.token}\n"
+            "The token is temporary: it is held in memory only and stops working when "
+            "this server stops.\n"
+            "Local development API (read-only, loopback only, JSON only). "
+            "For the Replay UI, run `agentbodycam replay`.\n"
+        )
+        stopped = "Replay API stopped."
+    else:
+        # The token is deliberately not printed: the UI page receives it from the server.
+        banner = (
+            "AgentBodycam Replay (UI preview)\n"
+            f"Project: {_display(str(project.resolve()))}\n"
+            f"Listening: {server.url}\n"
+            f"Open in your browser: {server.url}/\n"
+            "The Replay UI is under development: session dashboard and overview only.\n"
+            "Access is granted automatically to the page served at this address; the "
+            "address contains no secret and nothing is stored in your browser.\n"
+            "Read-only, loopback only.\n"
+        )
+        stopped = "Replay stopped."
     stop = stop if stop is not None else threading.Event()
     try:
         with _stop_event_on_signals(stop):
             thread = server.start()
-            _write(
-                out,
-                "AgentBodycam Replay API\n"
-                f"Project: {_display(str(project.resolve()))}\n"
-                f"Listening: {server.url}\n"
-                "Authentication: enabled (send `Authorization: Bearer <token>`)\n"
-                f"API token: {server.token}\n"
-                "The token is temporary: it is held in memory only and stops working when "
-                "this server stops.\n"
-                "Local development API (read-only, loopback only); no Replay UI yet.\n"
-                "Press Ctrl+C to stop.\n\n",
-            )
+            _write(out, banner + "Press Ctrl+C to stop.\n\n")
             while thread.is_alive() and not stop.wait(0.2):
                 pass
     finally:
         server.stop()
-    _write(out, "\nReplay API stopped.\n")
+    _write(out, f"\n{stopped}\n")
     return 0
 
 
@@ -804,6 +889,8 @@ def main(
         return _run_analyze(args, stream, err_stream)
     if args.command == "replay-api":
         return _run_replay_api(args, stream, err_stream)
+    if args.command == "replay":
+        return _run_replay(args, stream, err_stream)
 
     parser.print_help(stream)
     return 0
