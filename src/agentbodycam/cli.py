@@ -3,9 +3,9 @@
 Implemented: environment check, session-store commands (including the read-only
 ``session active``), the polling recorder (file changes and read-only Git state; one
 recorder per project), explicit wrapped-command capture (``run -- <command>``) and
-deterministic check results for wrapped commands (``run --check KIND -- <command>``) and
-read-only deterministic forensic analysis of a recorded session (``analyze``). Replay is
-not implemented yet and is intentionally absent from the CLI.
+deterministic check results for wrapped commands (``run --check KIND -- <command>``),
+read-only deterministic forensic analysis of a recorded session (``analyze``) and the
+local, authenticated, read-only Replay API (``replay-api``). There is no replay UI yet.
 """
 
 from __future__ import annotations
@@ -13,10 +13,13 @@ from __future__ import annotations
 import argparse
 import contextlib
 import math
+import signal
 import sys
-from collections.abc import Callable, Sequence
+import threading
+from collections.abc import Callable, Iterator, Sequence
 from datetime import datetime
 from pathlib import Path
+from types import FrameType
 from typing import TextIO
 
 from agentbodycam import __version__
@@ -36,6 +39,14 @@ from agentbodycam.core.recorder import (
     Recorder,
     StopReason,
     stop_on_signals,
+)
+from agentbodycam.core.replay import ReplayService
+from agentbodycam.core.replay_server import (
+    DEFAULT_HOST,
+    DEFAULT_PORT,
+    BindAddressError,
+    ReplayServer,
+    resolve_bind_host,
 )
 from agentbodycam.core.store import EventStore, StoreError
 from agentbodycam.models.events import Event, EventSource, EventType, EventValidationError
@@ -83,6 +94,24 @@ def _seconds(minimum: float, maximum: float) -> Callable[[str], float]:
     return parse
 
 
+def _loopback_host(text: str) -> str:
+    try:
+        resolve_bind_host(text)
+    except BindAddressError as exc:
+        raise argparse.ArgumentTypeError(str(exc)) from None
+    return text
+
+
+def _port(text: str) -> int:
+    try:
+        value = int(text)
+    except ValueError:
+        raise argparse.ArgumentTypeError(f"not an integer: {text!r}") from None
+    if not 0 <= value <= 65535:
+        raise argparse.ArgumentTypeError("must be between 0 and 65535")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog=PROG,
@@ -90,8 +119,9 @@ def build_parser() -> argparse.ArgumentParser:
             f"{TAGLINE}\n\nEarly development: file-system and read-only Git state recording, "
             "plus commands explicitly launched with `agentbodycam run -- ...` and their "
             "test/build/lint/typecheck results, and a deterministic, read-only forensic "
-            "report of a recorded session (`agentbodycam analyze`). Other terminal commands "
-            "and agent internals are not captured."
+            "report of a recorded session (`agentbodycam analyze`), served locally by a "
+            "read-only, authenticated Replay API (`agentbodycam replay-api`; no UI yet). "
+            "Other terminal commands and agent internals are not captured."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -241,6 +271,42 @@ def build_parser() -> argparse.ArgumentParser:
         help="Print the report as deterministic JSON (the same report, machine-readable).",
     )
     analyze.add_argument("session_id", metavar="<session-id>")
+
+    replay_api = subparsers.add_parser(
+        "replay-api",
+        parents=[project],
+        help="Serve the local, read-only Replay API (development; no Replay UI yet).",
+        description=(
+            "Serve recorded sessions, their forensic reports and paginated timelines as "
+            "JSON on a loopback address, for the future Replay UI. Runs in the foreground "
+            "until Ctrl+C.\n\n"
+            "Security: listens on 127.0.0.1 (or ::1 / localhost) only; public and LAN "
+            "addresses are refused. A new random API token is printed at startup; it is "
+            "held in memory only and stops working when the server stops. Every data "
+            "endpoint requires `Authorization: Bearer <token>`. Read-only: GET and HEAD "
+            "only, nothing is written, no Git or other process is run, no CORS is offered "
+            "and no outbound network request is made. Starting the server creates nothing "
+            "in the project.\n\n"
+            "Routes: /api/v1/health (no token), /api/v1/project, /api/v1/sessions, "
+            "/api/v1/sessions/<id>, /api/v1/sessions/<id>/report, "
+            "/api/v1/sessions/<id>/timeline?after_sequence=N&limit=N"
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    replay_api.add_argument(
+        "--host",
+        type=_loopback_host,
+        default=DEFAULT_HOST,
+        metavar="HOST",
+        help="Loopback address to listen on: 127.0.0.1 (default), ::1 or localhost.",
+    )
+    replay_api.add_argument(
+        "--port",
+        type=_port,
+        default=DEFAULT_PORT,
+        metavar="PORT",
+        help="Port to listen on (default: 0, a free port chosen by the operating system).",
+    )
     return parser
 
 
@@ -624,6 +690,83 @@ def _run_analyze(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return 0
 
 
+@contextlib.contextmanager
+def _stop_event_on_signals(stop: threading.Event) -> Iterator[None]:
+    """Ctrl+C, Ctrl+Break and SIGTERM set ``stop``. No-op outside the main thread."""
+    if threading.current_thread() is not threading.main_thread():
+        yield
+        return
+    signals = [signal.SIGINT, signal.SIGTERM]
+    if sys.platform == "win32":
+        signals.append(signal.SIGBREAK)
+
+    def handler(_signum: int, _frame: FrameType | None) -> None:
+        stop.set()
+
+    previous = {sig: signal.signal(sig, handler) for sig in signals}
+    try:
+        yield
+    finally:
+        for sig, old in previous.items():
+            signal.signal(sig, old)
+
+
+def _run_replay_api(
+    args: argparse.Namespace,
+    out: TextIO,
+    err: TextIO,
+    stop: threading.Event | None = None,
+) -> int:
+    project: Path = args.project if args.project is not None else Path.cwd()
+    if not project.is_dir():
+        err.write("error: the project directory does not exist or is not a directory\n")
+        return 1
+    try:
+        # Fails early on a symlinked/junctioned store; creates nothing.
+        EventStore(project).store_root_exists()
+    except StoreError:
+        err.write(
+            "error: the project's .agentbodycam store is not a plain directory inside the "
+            "project; refusing to serve it\n"
+        )
+        return 1
+    try:
+        server = ReplayServer(
+            ReplayService(project),
+            host=args.host,
+            port=args.port,
+            log=lambda line: _write(out, f"  {line}\n"),
+        )
+    except BindAddressError as exc:
+        err.write(f"error: {exc}\n")
+        return 2
+    except OSError as exc:
+        err.write(f"error: could not listen on {args.host} port {args.port}: {exc.strerror}\n")
+        return 1
+    stop = stop if stop is not None else threading.Event()
+    try:
+        with _stop_event_on_signals(stop):
+            thread = server.start()
+            _write(
+                out,
+                "AgentBodycam Replay API\n"
+                f"Project: {_display(str(project.resolve()))}\n"
+                f"Listening: {server.url}\n"
+                "Authentication: enabled (send `Authorization: Bearer <token>`)\n"
+                f"API token: {server.token}\n"
+                "The token is temporary: it is held in memory only and stops working when "
+                "this server stops.\n"
+                "Local development API (read-only, loopback only); no Replay UI yet.\n"
+                "Press Ctrl+C to stop.\n\n",
+            )
+            while thread.is_alive() and not stop.wait(0.2):
+                pass
+    finally:
+        server.stop()
+    _write(out, "\nReplay API stopped.\n")
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -659,6 +802,8 @@ def main(
         return _run_record(args, stream, err_stream)
     if args.command == "analyze":
         return _run_analyze(args, stream, err_stream)
+    if args.command == "replay-api":
+        return _run_replay_api(args, stream, err_stream)
 
     parser.print_help(stream)
     return 0

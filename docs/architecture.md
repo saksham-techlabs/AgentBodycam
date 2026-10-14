@@ -8,9 +8,10 @@
 > the one-recorder-per-project active-recording lease (section 3.1, "Active recording
 > lease") and explicit wrapped-command recording (`agentbodycam run -- ...`, section 3.1,
 > "Wrapped commands") with deterministic check results (`check.passed` / `check.failed`,
-> section 3.1, "Check results"), and the deterministic local forensics engine
-> (`agentbodycam analyze`, section 3.4). Capture of commands not launched through
-> `agentbodycam run`, adapters, the replay API, UI, export and AI are not implemented.
+> section 3.1, "Check results"), the deterministic local forensics engine
+> (`agentbodycam analyze`, section 3.4) and the local, authenticated, read-only Replay API
+> (`agentbodycam replay-api`, section 3.5). Capture of commands not launched through
+> `agentbodycam run`, adapters, the replay UI, export and AI are not implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -753,7 +754,7 @@ Code: `core/forensics.py` (analysis), `models/forensics.py` (typed report). CLI:
 agentbodycam analyze [--project DIR] [--json] <session-id>
 ```
 
-Library API (what the future Replay API will call directly):
+Library API (what the Replay API, section 3.5, calls directly):
 
 ```python
 analyze_session(store, session_id) -> ForensicReport      # reads session.json + events.jsonl
@@ -909,18 +910,122 @@ change windows use binary search over prefix counts per change kind (O(log n) pl
 listed items). Overall O(n log n) worst case, O(n) in practice; 16 000 events analyse in
 well under a second.
 
-### 3.5 Replay API
+### 3.5 Replay API (implemented)
 
-- Local-only HTTP/JSON API (bound to `127.0.0.1`) serving sessions, events, blobs and findings.
-- Read-only over recorded data.
-- Thin layer: the API exposes the store and the forensics engine; it contains no analysis
-  logic of its own.
+Code: `core/replay.py` (`ReplayService`, transport-independent), `core/replay_server.py`
+(HTTP transport), `models/replay.py` (response models). CLI:
+
+```text
+agentbodycam replay-api [--project DIR] [--host 127.0.0.1|::1|localhost] [--port N]
+```
+
+```text
+.agentbodycam stored evidence
+        -> EventStore reads + analyze_session()      (no second analysis)
+        -> ReplayService                             (read-only queries, typed results)
+        -> ReplayServer (http.server, loopback)      (auth, browser checks, JSON)
+        -> React/TypeScript Replay UI (section 3.6, not implemented)
+```
+
+**Thin layer.** `ReplayService` has `project()`, `list_sessions()`, `session_detail(id)`,
+`report(id)` / `report_dict(id)` and `timeline(id, after_sequence=, limit=)`. Every answer
+comes from `EventStore` reads and `analyze_session()`; session list and detail fields
+(`recording_state`, `analysis_complete`, counts) are taken from the forensic report, and
+timeline items are the report's own `TimelineItem` (`core.forensics.timeline_item`). Each
+call opens a fresh `EventStore` view: no shared mutable state, no cache of session data, so
+concurrent requests and a live recorder appending to a session are safe (a request sees
+every event fully written when it read the log). Store failures become a `ReplayError`
+with a stable code and a fixed message (store exception texts contain absolute paths and
+are never passed on). The HTTP layer only parses, authenticates, routes and serialises.
+
+**Security boundary.** The API is local IPC, never network access:
+
+| Concern | Decision |
+|---|---|
+| Binding | `127.0.0.1` by default; `::1` and `localhost` (bound as `127.0.0.1`, no DNS lookup) allowed; `0.0.0.0`, `::`, LAN IPs and names refused (`BindAddressError`, CLI exit 2). Port 0 by default. On Windows the socket uses `SO_EXCLUSIVEADDRUSE`; `HTTPServer`'s `getfqdn()` reverse lookup is skipped. |
+| Authentication | `secrets.token_urlsafe(32)` per server instance, memory only, printed once at startup; `Authorization: Bearer <token>` (scheme case-insensitive, exactly one header) compared with `secrets.compare_digest`. Required on every `/api/*` route except `/api/v1/health`. Query-string tokens are unknown parameters (400 when authenticated, 401 otherwise). |
+| Browsers | No CORS at all: no `Access-Control-*` header on any response, OPTIONS is 405. A foreign `Origin`, `Origin: null`, or `Sec-Fetch-Site: cross-site|same-site` gets 403 `origin_not_allowed`; a `Host` header other than `127.0.0.1:<port>` / `localhost:<port>` (`[::1]:<port>` for IPv6) gets 403 `host_not_allowed` (DNS rebinding). The future UI should be served by AgentBodycam from this same origin, so CORS is never needed. |
+| Headers | `Content-Type: application/json; charset=utf-8`, `Cache-Control: no-store`, `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, `Content-Security-Policy: default-src 'none'; frame-ancestors 'none'; sandbox`, `Cross-Origin-Resource-Policy: same-origin`, `Referrer-Policy: no-referrer`, `Server: AgentBodycam` (no Python version). |
+| Methods | GET and HEAD only. POST, PUT, PATCH, DELETE, OPTIONS, TRACE, CONNECT and unknown methods get 405 with `Allow: GET, HEAD`; their bodies are drained (up to 64 KiB) but never parsed. |
+| Paths | The request target is never percent-decoded and never mapped to a file. Routes are matched on exact raw segments; a session segment must match the session-ID pattern (`^[0-9]{8}T[0-9]{6}Z-[0-9a-f]{16}$`) or the request gets 400 `invalid_session_id`, so `..`, `%2e%2e`, `%2f`, `%5c` cannot reach the file system. |
+| Logging | `BaseHTTPRequestHandler`'s access/error logs are disabled. The optional log callback (the CLI prints it) receives `METHOD ROUTE-TEMPLATE STATUS`, e.g. `GET /api/v1/sessions/{session_id}/report 200`: no raw path, query, session ID, headers or token. Tracebacks are never printed or sent. |
+| Errors | Every response, including malformed HTTP (400, 414, 431, 505) and unexpected exceptions (500), is a JSON error; responses are never in header-less HTTP/0.9 form. |
+| Lifetime | Foreground only. `ThreadingHTTPServer` with non-daemon request threads joined on close and a 10 s socket timeout. Ctrl+C, Ctrl+Break and SIGTERM stop it cleanly; no service, daemon or browser launch. |
+
+**Routes** (`api_version: 1`; JSON is deterministic: sorted keys, 2-space indent, ASCII):
+
+| Route | Auth | Response |
+|---|---|---|
+| `GET /api/v1/health` | none | `{"status": "ok", "api_version": 1, "product": "AgentBodycam"}` |
+| `GET /api/v1/project` | bearer | `{"api_version": 1, "session_count": N}` (no project path) |
+| `GET /api/v1/sessions` | bearer | `{"api_version": 1, "total": N, "sessions": [SessionSummary...]}` newest first |
+| `GET /api/v1/sessions/<id>` | bearer | `SessionDetail` |
+| `GET /api/v1/sessions/<id>/report` | bearer | `ForensicReport.to_dict()` unchanged: byte-identical to `agentbodycam analyze --json` |
+| `GET /api/v1/sessions/<id>/timeline` | bearer | `TimelinePage` |
+
+There is deliberately no raw-event, payload, file or findings route: `/report` already
+carries every finding, and raw payloads (hashes, argv, Git root paths) are not needed by a
+replay UI.
+
+`SessionSummary`: `session_id`, `readable`, `status`, `recording_state`,
+`analysis_complete`, `started_at`, `ended_at`, `event_count`. A session whose metadata or
+log cannot be read is listed with `readable: false` and the other fields `null` instead of
+failing the whole list. Order: newest first by the start second in the session ID, then
+`started_at`, then session ID (all descending).
+
+`SessionDetail`: `api_version`, `session_id`, `status`, `recording_state`,
+`analysis_complete`, `started_at`, `ended_at`, `event_count`, `event_counts` (per type),
+`command_summary`, `observable_failure_count`, `recovery_count`,
+`unresolved_failure_count`, `warning_count`. No `project_root`, platform, host or user.
+
+`TimelinePage` (`?after_sequence=N&limit=N`): `api_version`, `session_id`,
+`after_sequence`, `limit`, `items` (`TimelineItem`: `sequence`, `event_id`, `timestamp`,
+`type`, `category`, `source`, `summary`, `path`, `command_id`, `evidence`), `total` (events
+stored when the page was read), `next_after_sequence` (the last item's sequence, or
+`after_sequence` for an empty page) and `has_more` (`next_after_sequence < total`). Items
+are the events with `after_sequence < sequence`, at most `limit`, in sequence order;
+following `next_after_sequence` visits every event exactly once and reproduces the
+report's timeline (which is capped at 5000 items; the paginated timeline is not).
+`after_sequence` >= 0 (default 0), `limit` 1-500 (default 100). Parameters are strictly
+validated: non-integers, a `+` sign, negative or out-of-range values, empty values,
+duplicates, unknown parameters, percent-encoding and query strings on routes that take
+none are 400 `invalid_parameter`.
+
+**Errors**: `{"error": {"code": "...", "message": "..."}}` with fixed messages.
+
+| Status | Codes |
+|---|---|
+| 400 | `bad_request`, `invalid_session_id`, `invalid_parameter` |
+| 401 | `unauthorized` (with `WWW-Authenticate: Bearer realm="agentbodycam"`) |
+| 403 | `origin_not_allowed`, `host_not_allowed` |
+| 404 | `not_found` (route), `session_not_found` |
+| 405 | `method_not_allowed` |
+| 500 | `session_unreadable` (corrupt session), `store_unsafe` (symlinked/junctioned store), `internal_error` |
+
+**Live and crashed sessions.** Nothing special: the report comes from `analyze_session()`,
+so a session being recorded is `recording_state: "recording"`, `analysis_complete: false`,
+and one whose recorder died is `ended_without_stop` (not repaired). The API never takes
+the recording lock beyond the existing instantaneous liveness probe, never blocks or stops
+the recorder, and a timeline page contains the events stored when it was read.
+
+**Read-only guarantees** (tested): starting the server on a project without recordings
+creates no `.agentbodycam/`; GET/HEAD requests, refused mutations and errors leave every
+byte under `.agentbodycam/` unchanged; requests start no process (no Git); the token never
+appears on disk, in responses or in the request log; the server binds loopback, performs
+no DNS lookup and opens no outbound connection.
+
+**Known limitations.** Every timeline page and report re-reads the session's log (O(events)
+per request; fine for local use, no caching by design). Concurrency is one thread per
+request without a cap, acceptable on loopback. HTTP/1.0 responses (one request per
+connection). The token is printed to the terminal that started the server; anyone who can
+read that terminal or run code as the same user can use it.
 
 ### 3.6 React/TypeScript Replay UI
 
 - Separate frontend package, added in a later task.
 - Timeline scrubbing, file/diff views, failure markers, "cinematic" replay of the session.
-- Consumes only the Replay API.
+- Consumes only the Replay API, preferably served by AgentBodycam from the API's own
+  loopback origin so that no CORS policy is ever needed.
 - Must clearly style facts and inferences differently (see section 2).
 
 ### 3.7 Share / export pipeline
@@ -945,11 +1050,12 @@ src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
   cli.py           argparse CLI (help, version, doctor, session create/list/show/active,
-                   record, run, analyze)
+                   record, run, analyze, replay-api)
   core/            application logic (doctor, filelock, store, active, ignore, scanner,
-                   git_observer, recorder, command, redact, checks, forensics)
+                   git_observer, recorder, command, redact, checks, forensics, replay,
+                   replay_server)
   models/          typed dataclasses shared across layers (environment, events, session,
-                   forensics)
+                   forensics, replay)
   utils/           small dependency-free helpers (today: Git detection and the bounded,
                    shell-free read-only Git command runner)
 ```

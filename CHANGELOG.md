@@ -9,6 +9,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Local, authenticated, read-only Replay API: `agentbodycam replay-api [--project DIR]
+  [--host 127.0.0.1|::1|localhost] [--port N]` (standard library `ThreadingHTTPServer`, no
+  new dependencies). Transport-independent `ReplayService` (`core/replay.py`) over
+  `EventStore` and `analyze_session()` (no second analysis), HTTP layer in
+  `core/replay_server.py`, response models in `models/replay.py`. Routes (GET/HEAD):
+  `/api/v1/health` (unauthenticated, nothing sensitive), `/api/v1/project`,
+  `/api/v1/sessions` (newest first), `/api/v1/sessions/<id>`,
+  `/api/v1/sessions/<id>/report` (byte-identical to `analyze --json`) and
+  `/api/v1/sessions/<id>/timeline?after_sequence=N&limit=N` (1-500, strictly validated,
+  same `TimelineItem` as the report, no raw payloads). Loopback binding only (public and
+  LAN addresses refused); a new `secrets.token_urlsafe(32)` bearer token per start, memory
+  only, compared in constant time; no CORS, foreign `Origin`/`Sec-Fetch-Site` and
+  DNS-rebinding `Host` headers refused; `no-store`, `nosniff` and other defensive headers;
+  every other method is 405; JSON errors with fixed messages; no default access log. Live
+  sessions report `analysis_complete: false`; crashed ones `ended_without_stop`. Starting
+  the server creates nothing; requests write nothing and run no process.
+- `core.forensics.timeline_item` is now public (the replay timeline reuses it).
 - Local deterministic forensics engine (`core/forensics.py`, typed report in
   `models/forensics.py`) and `agentbodycam analyze [--project DIR] [--json] <session-id>`.
   Read-only over stored evidence (writes nothing, runs no Git, no AI, no network).
@@ -109,6 +126,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- SECURITY.md describes what is recorded accurately (metadata such as paths, hashes, Git
+  state and redacted arguments; never file contents, diffs or command output) and
+  documents the Replay API's security model. The no-network test now separates
+  prohibited external network activity from the Replay API's loopback IPC.
 - `EventStore` no longer assumes a single writer per session.
 - The recorder appends through `append_recording_event()` and stops through
   `stop_recording_session()`.

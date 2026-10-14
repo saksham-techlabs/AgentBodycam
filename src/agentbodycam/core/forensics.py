@@ -449,7 +449,8 @@ def _validate_input(session: Session, events: Sequence[Event]) -> None:
         seen.add(event.event_id)
 
 
-def _timeline_item(event: Event) -> TimelineItem:
+def timeline_item(event: Event) -> TimelineItem:
+    """The safe, replay-facing view of one event: no payload is copied."""
     command_id = None
     if event.type in (
         EventType.COMMAND_STARTED,
@@ -880,7 +881,7 @@ def analyze_events(
     for event in events:
         counts[event.type.value] = counts.get(event.type.value, 0) + 1
         if len(timeline) < max_timeline_items:
-            timeline.append(_timeline_item(event))
+            timeline.append(timeline_item(event))
         kind = event.type
         change = _FILE_CHANGES.get(kind)
         if change is not None:

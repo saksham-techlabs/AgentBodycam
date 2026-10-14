@@ -7,8 +7,10 @@ There are no supported releases yet.
 
 ## Design commitments
 
-AgentBodycam is intended to record sensitive information about your projects
-(file contents, diffs, command output). The project commits to:
+AgentBodycam records potentially sensitive project metadata such as file paths, file
+hashes, Git state and redacted command arguments. It does not store file contents, diffs or
+command output; the "What is stored today" section below is the authoritative list. The
+project commits to:
 
 - **Local-first**: recorded data stays on your machine by default.
 - **No telemetry**: AgentBodycam does not phone home.
@@ -21,7 +23,7 @@ AgentBodycam is intended to record sensitive information about your projects
 ## What is stored today
 
 `agentbodycam session create`, `agentbodycam record` and `agentbodycam run` write only
-inside `<project>/.agentbodycam/`:
+inside `<project>/.agentbodycam/` (`analyze` and `replay-api` write nothing):
 
 - `.gitignore` containing `*`, so session data is not committed by accident.
 - `sessions/<id>/session.json`: session ID, absolute project path, start/end time, status,
@@ -92,7 +94,53 @@ operation, an error kind, the exit code and the first line of Git's error messag
 `user:password@` in URLs redacted.
 
 The project path can include your username (for example `C:\Users\<name>\...`); keep this
-in mind before sharing a session directory. No AgentBodycam code makes network requests.
+in mind before sharing a session directory. No AgentBodycam code makes outbound network
+requests; the only socket it ever opens is the loopback listener of the Replay API below.
+
+## Local Replay API (`agentbodycam replay-api`)
+
+A small, read-only HTTP/JSON API for the future Replay UI. It is a local development API;
+there is no Replay UI yet. Communication with it is **local IPC over the loopback
+interface**, not network access:
+
+- **Loopback only.** It binds `127.0.0.1` by default (`::1` or `localhost`, which is bound
+  as `127.0.0.1` without a DNS lookup, can be chosen). `0.0.0.0`, `::`, LAN addresses and
+  host names are refused with an error, so it cannot be exposed to your network by
+  accident. The port defaults to 0 (a free port chosen by the operating system). It runs in
+  the foreground only and stops with Ctrl+C; no service or background process is created.
+- **Temporary bearer token.** Every start generates a new `secrets.token_urlsafe(32)`
+  token, printed once in the terminal that started the server. It exists only in that
+  process's memory: it is never written to `.agentbodycam/`, session files, Git or logs, and
+  it stops working when the server stops. Every endpoint that returns project or session
+  data requires `Authorization: Bearer <token>` (compared in constant time); only
+  `/api/v1/health` (`{"status": "ok", "api_version": 1, "product": "AgentBodycam"}`) is
+  unauthenticated. Tokens in URLs or query strings are never accepted.
+- **Read-only.** Only GET and HEAD exist; POST, PUT, PATCH, DELETE, OPTIONS and anything
+  else get `405`. Requests never write, create or repair anything (starting the server on a
+  project without recordings creates nothing), run no Git command or other process and make
+  no outbound connection.
+- **Browser protections.** No CORS: no `Access-Control-*` header is ever sent (no
+  wildcard, no preflight approval), so a web page on another origin cannot read responses.
+  Requests with a foreign `Origin`, `Sec-Fetch-Site: cross-site|same-site`, or a `Host`
+  header other than this server's loopback address and port (DNS rebinding) are refused
+  with `403`. Every response is JSON with `Cache-Control: no-store`,
+  `X-Content-Type-Options: nosniff`, `X-Frame-Options: DENY`, a restrictive
+  `Content-Security-Policy` and `Cross-Origin-Resource-Policy: same-origin`. The future UI
+  is meant to be served from this same local origin, so CORS will not be needed.
+- **What it returns.** Session IDs, status, times and event counts; the same forensic
+  report as `agentbodycam analyze --json`; and a paginated timeline of the report's safe
+  per-event view (sequence, ID, time, type, category, source, summary, project-relative
+  path, command ID). Raw event payloads (hashes, argv, Git root paths), the absolute
+  project path, platform details, host and user names, environment variables, file
+  contents and command output are never returned.
+- **No leaks in errors or logs.** Errors are `{"error": {"code", "message"}}` with fixed
+  messages: no paths, tracebacks or exception text. The default HTTP access log is
+  disabled; the terminal shows only the method, route template and status of each request
+  (never the raw path, query string, session ID or headers).
+- The token keeps out web pages and other local users' programs that do not have it. It
+  cannot protect against programs running as your own user account, which can read
+  `.agentbodycam/` directly anyway. Data leaves your machine only if you deliberately share
+  it.
 
 ## Reporting a vulnerability
 
