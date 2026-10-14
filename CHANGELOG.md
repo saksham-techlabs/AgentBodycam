@@ -252,6 +252,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Release packaging hardening (no new features, version unchanged at 0.0.1): the sdist is
+  built from an explicit allowlist in `pyproject.toml`, so untracked local files in a
+  checkout (notes, screenshots, exports) can no longer end up in it. New
+  `tests/test_packaging.py` builds the wheel and sdist and checks metadata/version
+  agreement, exact wheel contents (no tests, web sources, source maps, stale UI bundles,
+  local paths or session data), sdist contents, byte-for-byte reproducible builds, that a
+  wheel built from the sdist is identical, and that the wheel installed offline into a
+  fresh virtual environment runs its CLI and serves the packaged Replay UI with no
+  Node.js, Git or source checkout available. README documents installing a locally built
+  wheel (AgentBodycam is not published to any package index).
 - Replay UI API client: every authorized request bootstraps a token when none is held;
   on a 401 it drops the token, bootstraps once and retries once (a second 401 is
   reported as unauthorized); abort is honoured at every step.

@@ -117,6 +117,23 @@ python -m venv .venv
 python -m pip install -e ".[dev]"
 ```
 
+## Install from a locally built wheel
+
+AgentBodycam is not published on PyPI or anywhere else. You can build a wheel from a
+checkout and install it into any Python 3.11+ environment; the wheel has no runtime
+dependencies and already contains the Replay UI, so Node.js is not needed:
+
+```bash
+# in the development environment above (hatchling comes with the `dev` extra)
+python -m hatchling build          # writes dist/agentbodycam-<version>-py3-none-any.whl
+                                   # and dist/agentbodycam-<version>.tar.gz
+# in the environment where you want to use it
+python -m pip install dist/agentbodycam-0.0.1-py3-none-any.whl
+agentbodycam --version
+```
+
+`dist/` is ignored by Git; built wheels and source archives are never committed.
+
 ## Usage
 
 ```bash

@@ -35,6 +35,13 @@ python scripts/check.py
 This runs `ruff format --check`, `ruff check`, `mypy` (strict) and `pytest`.
 Use `python scripts/check.py --fix` to auto-format first.
 
+`tests/test_packaging.py` builds the wheel and sdist with hatchling, inspects both, and
+installs the wheel offline into a fresh virtual environment to run the CLI and the Replay
+UI from it with only that environment on `PATH` (no Node.js, Git or source checkout).
+Release artifacts (`python -m hatchling build` writes them to `dist/`) are never
+committed. The sdist is built from an explicit allowlist in `pyproject.toml`; if you add
+a new top-level file or `web/` config file that downstream builders need, add it there.
+
 ## Replay UI (`web/`)
 
 The Replay UI is a React + TypeScript + Vite app. Node.js 20+ is needed only to work on

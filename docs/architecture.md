@@ -1268,7 +1268,8 @@ server's checks pass. `npm run build` typechecks and writes `src/agentbodycam/ui
 the build output is committed so that end users never need Node.js. Tests: Vitest +
 Testing Library (`npm run test`) against a fake server that mirrors the real routes, and
 `tests/test_replay_ui.py` for serving, headers, path safety, bootstrap, the CLI and
-wheel packaging.
+wheel packaging (`tests/test_packaging.py` covers release artifacts and the installed
+wheel).
 
 Still to come: possible final micro-polish of the replay view, file/diff views, GIF/MP4
 export, and clearly different styling of facts and inferences (section 2).
@@ -1437,3 +1438,13 @@ web/               Replay UI source (React + TypeScript + Vite); not part of the
 
 The CLI is built on the standard library `argparse` to keep the runtime dependency
 footprint at zero. That choice can be revisited if the command surface grows substantially.
+
+**Packaging.** Hatchling builds a pure-Python `py3-none-any` wheel containing only
+`agentbodycam/` (Python modules, `py.typed`, the built UI in `ui/static/`) plus metadata
+and the license; the version comes from `agentbodycam.__version__`. The sdist is an
+explicit allowlist (sources, tests, scripts, docs, the `web/` sources and lockfile, the
+top-level documents and `pyproject.toml`), with `.gitignore` exclusions applied on top,
+so untracked local files cannot leak into it. Builds are byte-for-byte reproducible
+(hatchling uses fixed archive timestamps) and a wheel built from the sdist is identical
+to one built from the checkout. `tests/test_packaging.py` checks all of this and runs the
+installed wheel from a fresh virtual environment without Node.js, Git or the checkout.

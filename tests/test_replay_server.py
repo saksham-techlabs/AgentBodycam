@@ -24,6 +24,7 @@ from agentbodycam.core.replay_server import (
     resolve_bind_host,
 )
 from agentbodycam.core.store import EventStore
+from command_helpers import wait_until
 from forensics_helpers import CAUSAL_LANGUAGE, SessionBuilder
 from replay_helpers import ApiClient, Reply, raw_request, serve, store_snapshot
 
@@ -585,6 +586,8 @@ def test_request_log_has_no_token_ids_or_queries(api: Api) -> None:
     api.client.get(f"/api/v1/sessions?token={api.server.token}")
     api.client.request("POST", api.base)
     api.client.get("/api/v1/sessions", headers={"Origin": "https://evil.example"})
+    # The server thread logs after the response is sent, so the last line may lag.
+    wait_until(lambda: len(api.logs) >= 5, timeout=10, what="request log lines")
     assert api.logs == [
         "GET /api/v1/sessions/{session_id}/timeline 200",
         "GET (unmatched) 401",

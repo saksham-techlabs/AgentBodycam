@@ -46,6 +46,33 @@ path = "src/agentbodycam/__init__.py"
 [tool.hatch.build.targets.wheel]
 packages = ["src/agentbodycam"]
 
+# An allowlist, so untracked local files (scratch notes, screenshots, exports) in a
+# checkout never reach the sdist. .gitignore exclusions still apply on top of it.
+[tool.hatch.build.targets.sdist]
+include = [
+    "/src/agentbodycam",
+    "/tests",
+    "/scripts",
+    "/docs",
+    "/examples",
+    "/web/src",
+    "/web/public",
+    "/web/index.html",
+    "/web/package.json",
+    "/web/package-lock.json",
+    "/web/tsconfig.json",
+    "/web/tsconfig.node.json",
+    "/web/vite.config.ts",
+    "/README.md",
+    "/LICENSE",
+    "/CHANGELOG.md",
+    "/SECURITY.md",
+    "/CONTRIBUTING.md",
+    "/.gitignore",
+    "/.gitattributes",
+    "/.editorconfig",
+]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = ["-ra", "--strict-markers", "--strict-config"]
