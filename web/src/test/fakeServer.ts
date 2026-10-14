@@ -5,7 +5,8 @@
 
 import { vi } from "vitest";
 
-import type { SessionDetail, SessionSummary } from "../api/types";
+import type { ForensicReport, SessionDetail, SessionSummary, TimelineItem } from "../api/types";
+import { RICH_TIMELINE, item, longTimeline, plainReport, richReport } from "./fixtures";
 
 export const TOKEN = "Zq3vX8_t-Y2kLm9Pw4Rb7Nc1Hs6Df0Gj5Ua2Ke8Vo3";
 
@@ -22,7 +23,7 @@ export interface RecordedRequest {
   headers: Record<string, string>;
 }
 
-type Reply = { status: number; body: unknown } | "network-error";
+export type Reply = { status: number; body: unknown } | "network-error";
 type Handler = (path: string) => Reply | undefined;
 
 function readable(
@@ -46,8 +47,8 @@ function readable(
 
 export const SESSIONS: SessionSummary[] = [
   readable(LIVE_ID, "recording", { event_count: 3 }),
-  readable(STOPPED_ID, "stopped", { event_count: 1234 }),
-  readable(CRASHED_ID, "ended_without_stop", { event_count: 7 }),
+  readable(STOPPED_ID, "stopped", { event_count: RICH_TIMELINE.length }),
+  readable(CRASHED_ID, "ended_without_stop", { event_count: 250 }),
   readable(UNKNOWN_ID, "unknown", { event_count: 2 }),
   readable(CREATED_ID, "not_started", { event_count: 0 }),
   {
@@ -94,9 +95,29 @@ function error(status: number, code: string): Reply {
   return { status, body: { error: { code, message: `backend text for ${code} at C:\\secret` } } };
 }
 
+export function defaultTimelines(): Map<string, TimelineItem[]> {
+  return new Map([
+    [
+      LIVE_ID,
+      [
+        item(1, "session.started", "Recording started", { salt: "c", base: "2026-10-14T03:15:00Z" }),
+        item(2, "git.snapshot", "Git: main @ 9f8e7d6, clean", { salt: "c", base: "2026-10-14T03:15:00Z" }),
+        item(3, "file.modified", "Modified README.md", { path: "README.md", salt: "c", base: "2026-10-14T03:15:00Z" }),
+      ],
+    ],
+    [STOPPED_ID, [...RICH_TIMELINE]],
+    [CRASHED_ID, longTimeline(250)],
+    [UNKNOWN_ID, longTimeline(2, "d")],
+    [CREATED_ID, []],
+  ]);
+}
+
 export class FakeServer {
   readonly requests: RecordedRequest[] = [];
   sessions: SessionSummary[] = [...SESSIONS];
+  timelines = defaultTimelines();
+  /** Per-session report replacements; otherwise a report is derived from the fixtures. */
+  reports = new Map<string, ForensicReport>();
   bootstrap: Reply = { status: 200, body: { api_version: 1, token: TOKEN } };
   token = TOKEN;
   /** Checked before the built-in routes; return undefined to fall through. */
@@ -114,6 +135,15 @@ export class FakeServer {
     });
   });
 
+  reportFor(sessionId: string): ForensicReport | null {
+    const replaced = this.reports.get(sessionId);
+    if (replaced !== undefined) return replaced;
+    const session = this.sessions.find((s) => s.session_id === sessionId);
+    if (session === undefined || !session.readable) return null;
+    if (sessionId === STOPPED_ID) return richReport(sessionId);
+    return plainReport(session, this.timelines.get(sessionId) ?? []);
+  }
+
   #route(path: string, headers: Record<string, string>): Reply {
     if (path === "/ui/bootstrap") return this.bootstrap;
     if (path === "/api/v1/health") {
@@ -129,14 +159,33 @@ export class FakeServer {
         body: { api_version: 1, sessions: this.sessions, total: this.sessions.length },
       };
     }
-    const match = /^\/api\/v1\/sessions\/([^/]+)$/.exec(path);
-    if (match !== null) {
-      const session = this.sessions.find((s) => s.session_id === match[1]);
-      if (session === undefined) return error(404, "session_not_found");
-      if (!session.readable) return error(500, "session_unreadable");
-      return { status: 200, body: detailFor(session) };
-    }
-    return error(404, "not_found");
+    const match = /^\/api\/v1\/sessions\/([^/?]+)(?:\/(report|timeline))?(?:\?(.*))?$/.exec(path);
+    if (match === null) return error(404, "not_found");
+    const [, sessionId = "", sub, query] = match;
+    const session = this.sessions.find((s) => s.session_id === sessionId);
+    if (session === undefined) return error(404, "session_not_found");
+    if (!session.readable) return error(500, "session_unreadable");
+    if (sub === undefined) return { status: 200, body: detailFor(session) };
+    if (sub === "report") return { status: 200, body: this.reportFor(sessionId) };
+    const params = new URLSearchParams(query ?? "");
+    const after = Number(params.get("after_sequence") ?? "0");
+    const limit = Number(params.get("limit") ?? "100");
+    const all = this.timelines.get(sessionId) ?? [];
+    const items = all.filter((i) => i.sequence > after).slice(0, limit);
+    const next = items.at(-1)?.sequence ?? after;
+    return {
+      status: 200,
+      body: {
+        api_version: 1,
+        session_id: sessionId,
+        after_sequence: after,
+        limit,
+        items,
+        next_after_sequence: next,
+        has_more: next < all.length,
+        total: all.length,
+      },
+    };
   }
 
   pathsRequested(): string[] {

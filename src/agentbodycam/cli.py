@@ -5,8 +5,8 @@ Implemented: environment check, session-store commands (including the read-only
 recorder per project), explicit wrapped-command capture (``run -- <command>``) and
 deterministic check results for wrapped commands (``run --check KIND -- <command>``),
 read-only deterministic forensic analysis of a recorded session (``analyze``), the local,
-authenticated, read-only Replay API (``replay-api``) and the foundation of the local Replay
-UI served from the same loopback origin (``replay``; under development).
+authenticated, read-only Replay API (``replay-api``) and the local Replay UI served from
+the same loopback origin (``replay``; under development).
 """
 
 from __future__ import annotations
@@ -315,12 +315,13 @@ def build_parser() -> argparse.ArgumentParser:
     replay = subparsers.add_parser(
         "replay",
         parents=[project],
-        help="Open the local Replay UI (under development: session dashboard and overview).",
+        help="Open the local Replay UI (under development: sessions, timeline, findings).",
         description=(
             "Serve the Replay UI and the Replay API from one loopback address, then open the "
             "printed address in your browser. Runs in the foreground until Ctrl+C. The UI "
-            "is under development: it lists recorded sessions and shows a session overview; "
-            "the replay timeline and detailed findings are not built yet.\n\n"
+            "is under development: it lists recorded sessions and shows each session's "
+            "overview, paginated timeline, findings, observed files and last recorded Git "
+            "state; cinematic playback and export are not built yet.\n\n"
             "Security: listens on 127.0.0.1 (or ::1 / localhost) only. The UI ships inside "
             "the package (no Node.js needed) and is served from the API's own origin, so no "
             "CORS is involved. A new random API token is created at startup, held in memory "
@@ -833,7 +834,7 @@ def _serve_replay(
             f"Project: {_display(str(project.resolve()))}\n"
             f"Listening: {server.url}\n"
             f"Open in your browser: {server.url}/\n"
-            "The Replay UI is under development: session dashboard and overview only.\n"
+            "The Replay UI is under development: no cinematic playback or export yet.\n"
             "Access is granted automatically to the page served at this address; the "
             "address contains no secret and nothing is stored in your browser.\n"
             "Read-only, loopback only.\n"

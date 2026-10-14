@@ -10,20 +10,38 @@
  */
 
 import { ApiError, isAbort, kindForStatus } from "./errors";
-import type { HealthResponse, ProjectSummary, SessionDetail, SessionsResponse } from "./types";
+import type {
+  ForensicReport,
+  HealthResponse,
+  ProjectSummary,
+  SessionDetail,
+  SessionsResponse,
+  TimelinePage,
+} from "./types";
 import {
   InvalidResponseError,
   errorCode,
   isSessionId,
   parseBootstrap,
+  parseForensicReport,
   parseHealth,
   parseProject,
   parseSessionDetail,
   parseSessions,
+  parseTimelinePage,
 } from "./validate";
 
 export const BOOTSTRAP_PATH = "/ui/bootstrap";
 export const BOOTSTRAP_HEADER = "X-AgentBodycam-UI";
+
+/** The backend's default and maximum timeline page sizes (`models/replay.py`). */
+export const TIMELINE_PAGE_SIZE = 100;
+export const TIMELINE_MAX_LIMIT = 500;
+
+export interface TimelineQuery {
+  afterSequence?: number;
+  limit?: number;
+}
 
 export type FetchLike = (input: string, init: RequestInit) => Promise<Response>;
 
@@ -90,25 +108,66 @@ export class ReplayApiClient {
   }
 
   async session(sessionId: string, signal?: AbortSignal): Promise<SessionDetail> {
-    if (!isSessionId(sessionId)) throw new ApiError("bad_request", null, "invalid_session_id");
-    const data = await this.#authorized(`/api/v1/sessions/${sessionId}`, signal);
-    return parsed(parseSessionDetail, data);
+    const data = await this.#authorized(sessionPath(sessionId), signal);
+    const detail = parsed(parseSessionDetail, data);
+    if (detail.session_id !== sessionId) throw new ApiError("invalid_response");
+    return detail;
+  }
+
+  /** The session's forensic report: exactly what `agentbodycam analyze --json` returns. */
+  async report(sessionId: string, signal?: AbortSignal): Promise<ForensicReport> {
+    const data = await this.#authorized(`${sessionPath(sessionId)}/report`, signal);
+    const report = parsed(parseForensicReport, data);
+    if (report.session_id !== sessionId) throw new ApiError("invalid_response");
+    return report;
   }
 
   /**
-   * A bearer-authenticated GET. A 401 means the token belongs to an earlier server
-   * instance (tokens die with their server), so the page bootstraps once more and retries
-   * once; a second 401 is reported.
+   * One page of the session's timeline: events with `sequence > afterSequence`, at most
+   * `limit`, strictly ordered. The page must answer exactly the request that was sent.
+   */
+  async timeline(
+    sessionId: string,
+    { afterSequence = 0, limit = TIMELINE_PAGE_SIZE }: TimelineQuery = {},
+    signal?: AbortSignal,
+  ): Promise<TimelinePage> {
+    if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
+      throw new ApiError("bad_request", null, "invalid_parameter");
+    }
+    if (!Number.isSafeInteger(limit) || limit < 1 || limit > TIMELINE_MAX_LIMIT) {
+      throw new ApiError("bad_request", null, "invalid_parameter");
+    }
+    const path = `${sessionPath(sessionId)}/timeline?after_sequence=${afterSequence}&limit=${limit}`;
+    const page = parsed(parseTimelinePage, await this.#authorized(path, signal));
+    if (
+      page.session_id !== sessionId ||
+      page.after_sequence !== afterSequence ||
+      page.limit !== limit
+    ) {
+      throw new ApiError("invalid_response");
+    }
+    return page;
+  }
+
+  /**
+   * A bearer-authenticated GET. A 401 means the token is missing, wrong or belongs to an
+   * earlier server instance (tokens die with their server), so the token is dropped, the
+   * page bootstraps exactly once more and the request is retried exactly once; a second
+   * 401 is reported as unauthorized. Aborts propagate at every step.
    */
   async #authorized(path: string, signal: AbortSignal | undefined): Promise<unknown> {
-    const hadToken = this.#token !== null;
-    if (!hadToken) await this.connect(signal);
+    if (this.#token === null) {
+      await this.connect(signal);
+      signal?.throwIfAborted();
+    }
     try {
       return await this.#request(path, this.#authHeader(), signal);
     } catch (error) {
-      if (!(hadToken && error instanceof ApiError && error.kind === "unauthorized")) throw error;
+      if (!(error instanceof ApiError && error.kind === "unauthorized")) throw error;
       this.#token = null;
+      signal?.throwIfAborted();
       await this.connect(signal);
+      signal?.throwIfAborted();
       return this.#request(path, this.#authHeader(), signal);
     }
   }
@@ -150,6 +209,12 @@ export class ReplayApiClient {
     if (body === null) throw new ApiError("invalid_response", response.status);
     return body;
   }
+}
+
+/** Session IDs are checked before any request, so nothing else can reach the URL path. */
+function sessionPath(sessionId: string): string {
+  if (!isSessionId(sessionId)) throw new ApiError("bad_request", null, "invalid_session_id");
+  return `/api/v1/sessions/${sessionId}`;
 }
 
 function parsed<T>(parse: (value: unknown) => T, value: unknown): T {

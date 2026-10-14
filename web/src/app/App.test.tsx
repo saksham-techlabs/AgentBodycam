@@ -46,7 +46,8 @@ describe("session dashboard", () => {
     expect(stopped).toHaveTextContent("STOPPED");
     expect(stopped).toHaveTextContent("2026-10-14 02:15:00 UTC");
     expect(stopped).toHaveTextContent("4m 05s");
-    expect(stopped).toHaveTextContent("1,234");
+    expect(stopped).toHaveTextContent("21");
+    expect(row(CRASHED_ID)).toHaveTextContent("250");
     expect(stopped).toHaveTextContent("Complete");
   });
 
@@ -125,7 +126,7 @@ describe("session overview", () => {
     expect(server.pathsRequested()).toContain(`/api/v1/sessions/${STOPPED_ID}`);
 
     const metric = (label: string) => screen.getByTestId(`metric-${label}`);
-    expect(metric("Events")).toHaveTextContent("1,234");
+    expect(metric("Events")).toHaveTextContent("21");
     expect(metric("Observable failures")).toHaveTextContent("1");
     expect(metric("Recoveries")).toHaveTextContent("1");
     expect(metric("Unresolved")).toHaveTextContent("0");

@@ -10,11 +10,12 @@
 > "Wrapped commands") with deterministic check results (`check.passed` / `check.failed`,
 > section 3.1, "Check results"), the deterministic local forensics engine
 > (`agentbodycam analyze`, section 3.4) and the local, authenticated, read-only Replay API
-> (`agentbodycam replay-api`, section 3.5). The Replay UI is **under development**: only
-> its foundation exists (`agentbodycam replay`, section 3.6: app shell, connection status,
-> session dashboard and session overview). Capture of commands not launched through
-> `agentbodycam run`, adapters, the replay timeline and detailed views, export and AI are
-> not implemented.
+> (`agentbodycam replay-api`, section 3.5). The Replay UI is **under development**
+> (`agentbodycam replay`, section 3.6: app shell, connection status, session dashboard,
+> overview, paginated forensic timeline with first-failure / recovery / unresolved
+> markers, findings, observed files and last recorded Git / final state). Capture of
+> commands not launched through `agentbodycam run`, adapters, cinematic playback, file
+> contents and diffs, export and AI are not implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -927,7 +928,7 @@ agentbodycam replay-api [--project DIR] [--host 127.0.0.1|::1|localhost] [--port
         -> EventStore reads + analyze_session()      (no second analysis)
         -> ReplayService                             (read-only queries, typed results)
         -> ReplayServer (http.server, loopback)      (auth, browser checks, JSON)
-        -> React/TypeScript Replay UI (section 3.6, foundation only)
+        -> React/TypeScript Replay UI (section 3.6, under development)
 ```
 
 **Thin layer.** `ReplayService` has `project()`, `list_sessions()`, `session_detail(id)`,
@@ -1023,7 +1024,7 @@ request without a cap, acceptable on loopback. HTTP/1.0 responses (one request p
 connection). The token is printed to the terminal that started the server; anyone who can
 read that terminal or run code as the same user can use it.
 
-### 3.6 React/TypeScript Replay UI (under development: foundation only)
+### 3.6 React/TypeScript Replay UI (under development)
 
 Code: `web/` (React 19, TypeScript, Vite; Node.js is a build-time tool only), built into
 `src/agentbodycam/ui/static/` (committed and shipped in the wheel), loaded by
@@ -1056,8 +1057,47 @@ evidence. Manual refresh; while a session is live the visible view polls every 2
 or session change). No WebSockets or SSE. Routing uses the History API; the session ID
 in `/session/<id>` is validated against the session-ID pattern on both sides.
 
-**Not implemented yet.** Timeline, scrubbing, findings/file/Git/final-state views,
-diff viewer, cinematic replay, export. The overview tabs for them are visibly disabled.
+**Implemented (10B): replay views.** The session page has five keyboard-navigable tabs
+(Overview, Timeline, Findings, Files, Git / Final State); the URL stays `/session/<id>`
+and the tab is component state (nothing from the report goes into the URL). The views
+use only `GET /api/v1/sessions/<id>`, `/report` and `/timeline?after_sequence=N&limit=N`.
+
+- *Timeline* (`views/TimelineView.tsx`, `hooks/useTimeline.ts`, `lib/timeline.ts`). Pages
+  of 100 (500 when jumping) are requested with the server's `next_after_sequence` as the
+  next cursor; the client never computes a cursor. `appendPage` rejects a page whose
+  cursor does not match, whose sequences overlap or go backwards, whose event IDs repeat
+  or whose `total` shrinks, as `invalid_response`. One page request is in flight at a
+  time. Rows have a fixed height and are windowed (only the visible rows plus an
+  overscan of 10 are mounted; no virtualization dependency). Each row shows sequence,
+  time, a type label and glyph (so colour is never the only signal), summary, path and
+  evidence kind. Tones: neutral/blue evidence, green `check.passed` and recoveries, red
+  `check.failed` only, amber errors and warnings; file changes are never red.
+  Filters and the search box (summary, path, type) work on loaded events only, keep
+  sequence order and say so. The detail panel shows the `TimelineItem` fields only.
+- *Markers* come from the report's structured references (`first_failure`,
+  `recoveries[]`, `unresolved_failures[]`: event IDs plus sequences), never from text,
+  and are applied only when both ID and sequence match a loaded event: FIRST OBSERVABLE
+  FAILURE, FIRST / LAST FAILED RUN, OBSERVED RECOVERY, UNRESOLVED IN THIS RECORDING.
+  "Jump to event" loads pages until the event is reached (at most 50 pages, cancellable).
+- *Findings* (`views/FindingsView.tsx`): first observable failure, observed recoveries
+  with their change windows (count, created/modified/deleted breakdown, bounded path list,
+  truncation notice, "observed between ..." wording), unresolved failures, incomplete
+  commands, errors observed and warnings, each marked OBSERVED.
+- *Files* (`views/FilesView.tsx`): `file_changes` counts and the bounded path list,
+  described as observed during the recording.
+- *Git / Final State* (`views/GitStateView.tsx`): `final_git_state` as the *last recorded*
+  Git state, `final_check_states` (ungrouped runs marked and explained) and the command
+  summary.
+- *Live sessions*: the existing 2.5 s poller refreshes the session detail and report and
+  appends new timeline pages from the last cursor (no overlap, paused while hidden, stopped
+  on unmount, session change or when recording stops, followed by one final refresh).
+  A report briefly ahead of or behind the loaded timeline during recording is expected.
+
+No wording attributes a failure or recovery to a file change; the UI shows no raw event
+payloads, file contents, diffs, command output or absolute paths.
+
+**Not implemented yet.** Cinematic playback and scrubbing, file contents and diff viewer,
+export and sharing.
 
 **API client** (`web/src/api/`). GET only, `cache: "no-store"`, `credentials:
 "same-origin"`, `redirect: "error"`, `referrerPolicy: "no-referrer"`, an `AbortSignal` per
@@ -1066,7 +1106,14 @@ runtime against types that mirror `models/replay.py` exactly (`ProjectSummary`,
 `SessionSummary`, `SessionsResponse`, `SessionDetail`, `ApiError`); an unexpected shape is
 an `invalid_response` error rather than undefined behaviour. 400/401/403/404/500 and
 network failures become typed `ApiError` kinds with fixed user-facing messages (backend
-messages are not rendered). On a 401 the client re-bootstraps once and retries.
+messages are not rendered). Report and timeline responses are validated the same way
+(`ForensicReport`, `TimelinePage` and their parts mirror `models/forensics.py` and
+`models/replay.py`), including internal consistency (ordered sequences, bounded-list
+totals, page cursor and `has_more`) and that the echoed session ID and query match the
+request. Session IDs and timeline parameters are validated before any request. Every
+authorized request bootstraps a token if none is held; on a 401 the client drops the
+token, bootstraps exactly once and retries exactly once; a second 401 is reported as
+unauthorized. An aborted signal stops the sequence at every step.
 
 **Static serving** (`core/ui_assets.py`). `load_ui_bundle()` reads the packaged `static/`
 directory once at startup (through `importlib.resources`, so zipped installs work) into an
@@ -1123,8 +1170,8 @@ Testing Library (`npm run test`) against a fake server that mirrors the real rou
 `tests/test_replay_ui.py` for serving, headers, path safety, bootstrap, the CLI and
 wheel packaging.
 
-Still to come: the timeline and scrubbing, file/diff views, failure markers, the
-"cinematic" replay, and clearly different styling of facts and inferences (section 2).
+Still to come: the "cinematic" replay and scrubbing, file/diff views, export, and clearly
+different styling of facts and inferences (section 2).
 
 ### 3.7 Share / export pipeline
 

@@ -21,10 +21,13 @@
 > - wrapped commands and deterministic check outcomes
 > - local deterministic forensic analysis
 > - local authenticated Replay API (loopback only, read-only)
-> - Replay UI foundation (under development: dashboard and session overview)
+> - Replay UI (under development): dashboard, session overview, paginated forensic
+>   timeline, first-failure / recovery / unresolved markers, findings view, observed
+>   files view, last-recorded Git and final-state view
 >
 > Still not implemented:
-> - Replay UI timeline, scrubbing, file and Git views, cinematic replay
+> - cinematic playback and scrubbing
+> - file contents and diffs
 > - share/export (cards, video)
 > - agent-specific adapters
 > - optional AI analyst
@@ -66,7 +69,7 @@ It is designed to be:
 | Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
 | Local forensics engine (`analyze`) | Implemented (deterministic, read-only, observed findings only) |
 | Local Replay API (`replay-api`) | Implemented (loopback only, temporary bearer token, read-only, standard library only) |
-| Replay UI (`replay`) | Under development: foundation only (session dashboard, session overview); no timeline yet |
+| Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, findings, observed files, last recorded Git/final state; no cinematic playback, no export |
 | Share/export | Not started |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
 | Optional AI analysis | Not started |
@@ -349,7 +352,7 @@ network request. A session that is still being recorded can be analysed; the rep
 then marked `analysis_complete: false`. A session whose recorder crashed is reported as
 `ended_without_stop`.
 
-### Replay UI (preview, under development)
+### Replay UI (under development)
 
 ```text
 $ agentbodycam replay
@@ -357,7 +360,7 @@ AgentBodycam Replay (UI preview)
 Project: C:\work\app
 Listening: http://127.0.0.1:54321
 Open in your browser: http://127.0.0.1:54321/
-The Replay UI is under development: session dashboard and overview only.
+The Replay UI is under development: no cinematic playback or export yet.
 Access is granted automatically to the page served at this address; the address contains no secret and nothing is stored in your browser.
 Read-only, loopback only.
 Press Ctrl+C to stop.
@@ -373,11 +376,26 @@ run time). Today it shows:
   crashed or was killed), `UNKNOWN`, `NOT STARTED` or `UNREADABLE`;
 - a session overview (`/session/<id>`): recording state, start, end or "still recording",
   event count, observable failures, observed recoveries, unresolved failures, warnings,
-  event counts per type and command/check totals.
+  event counts per type and command/check totals;
+- a **Timeline** tab: the session's evidence in sequence order, loaded 100 events at a
+  time from the Replay API ("Load more", or automatically near the end of the list), with
+  a marker per event, the first observable failure ("Jump to first failure"), the failed
+  and passing runs of each observed recovery and checks unresolved in this recording.
+  Filters (All, Files, Git, Commands, Checks, Errors, Failures only) and the search box
+  cover loaded events only and never reorder them. Selecting an event shows its safe
+  fields (sequence, event ID, time, type, source, path, command ID, evidence);
+- a **Findings** tab: first observable failure, observed recoveries (with the file changes
+  observed between the failed and later passing runs), unresolved failures, incomplete
+  commands, errors observed and evidence notes; every reference can jump to its event;
+- a **Files** tab: the paths observed during this recording and their change counts;
+- a **Git / Final State** tab: the last recorded Git state, the final state of each
+  check and the command summary.
 
-Refresh is manual; while a session is live its view refreshes every 2.5 s (paused while
-the browser tab is hidden). Timeline replay, scrubbing, file/diff and Git views, export and
-sharing are **not implemented yet**.
+All findings are observed facts from the recording: the UI never attributes a failure or
+a recovery to a file change. While a session is live the report and timeline refresh
+every 2.5 s (never overlapping, paused while the browser tab is hidden). Cinematic
+playback and scrubbing, file contents and diffs, export and sharing are **not implemented
+yet**.
 
 How the page gets API access: the page asks its own server for the temporary token with a
 same-origin `fetch()` (`GET /ui/bootstrap`, which requires a custom header and browser

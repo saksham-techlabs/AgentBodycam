@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Replay UI functional replay views (still under development): the session page now has
+  Overview, Timeline, Findings, Files and Git / Final State tabs (URL stays
+  `/session/<id>`). Paginated forensic timeline over
+  `GET /api/v1/sessions/<id>/timeline` (100 per page, server cursor only, strict page
+  validation, windowed rendering, keyboard navigation), with markers from the report's
+  structured references: FIRST OBSERVABLE FAILURE (plus "Jump to first failure"), first
+  and last failed runs and OBSERVED RECOVERY for each recovery, UNRESOLVED IN THIS
+  RECORDING. Client-side filters and search over loaded events (order preserved), a
+  detail panel with safe `TimelineItem` fields and "Copy event ID". Findings view (first
+  failure, recoveries with observed change windows, unresolved failures, incomplete
+  commands, errors observed, warnings; every reference can jump to its event), observed
+  files view and last recorded Git / final check state / command summary view. Live
+  sessions refresh the report and append timeline pages every 2.5 s. Typed, runtime-
+  validated `ForensicReport` and `TimelinePage` models; `report()` and `timeline()` client
+  methods. No backend routes or semantics changed; no raw payloads, file contents, diffs
+  or causal wording. Cinematic playback, scrubbing and export are not implemented.
 - Replay UI foundation (under development): `agentbodycam replay [--project DIR]
   [--host 127.0.0.1|::1|localhost] [--port N]` serves a React/TypeScript UI (source in
   `web/`, Vite build committed to `src/agentbodycam/ui/static/` and shipped in the wheel;
@@ -144,6 +160,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Replay UI API client: every authorized request bootstraps a token when none is held;
+  on a 401 it drops the token, bootstraps once and retries once (a second 401 is
+  reported as unauthorized); abort is honoured at every step.
+- `agentbodycam replay` help and banner text describe the new views.
 - `replay-api` stays API-only (no UI routes, no token bootstrap); its banner points to
   `agentbodycam replay` for the UI. SECURITY.md documents the UI's threat model, including
   the weaker protection against other local users while `replay` is running.
