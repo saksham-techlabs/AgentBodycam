@@ -142,7 +142,18 @@ def _build(directory: Path) -> Artifacts:
 
 @pytest.fixture(scope="module")
 def artifacts(tmp_path_factory: pytest.TempPathFactory) -> Artifacts:
-    return _build(tmp_path_factory.mktemp("dist") / "first")
+    """A fresh build, or with AGENTBODYCAM_TEST_DIST=<dir> the exact files CI uploads."""
+    prebuilt = os.environ.get("AGENTBODYCAM_TEST_DIST")
+    if not prebuilt:
+        return _build(tmp_path_factory.mktemp("dist") / "first")
+    directory = Path(prebuilt).resolve()
+    found = {path.name for path in directory.iterdir()}
+    artifacts = Artifacts(
+        wheel=directory / f"agentbodycam-{VERSION}-py3-none-any.whl",
+        sdist=directory / f"agentbodycam-{VERSION}.tar.gz",
+    )
+    assert found == {artifacts.wheel.name, artifacts.sdist.name}, sorted(found)
+    return artifacts
 
 
 def _wheel_files(wheel: Path) -> dict[str, bytes]:
@@ -209,6 +220,13 @@ def test_metadata_is_consistent(artifacts: Artifacts) -> None:
     assert artifacts.sdist.name == f"agentbodycam-{VERSION}.tar.gz"
     pkg_info = _sdist_files(artifacts.sdist)[f"{SDIST_PREFIX}PKG-INFO"]
     assert email.message_from_bytes(pkg_info)["Version"] == VERSION
+
+
+def test_web_ui_version_matches_the_python_package() -> None:
+    """The two versions are defined separately; they must not drift apart."""
+    web = json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))
+    lock = json.loads((ROOT / "web" / "package-lock.json").read_text(encoding="utf-8"))
+    assert web["version"] == lock["version"] == lock["packages"][""]["version"] == VERSION
 
 
 # -- wheel contents --------------------------------------------------------------------------
@@ -293,10 +311,11 @@ def test_sdist_contains_every_tracked_file(artifacts: Artifacts) -> None:
     )
     if result.returncode != 0:
         pytest.skip("git ls-files unavailable")
+    # GitHub configuration (workflows, templates) is not needed to build or test a release.
     tracked = {
         name
         for name in result.stdout.decode("utf-8").split("\0")
-        if name and (ROOT / name).is_file()
+        if name and not name.startswith(".github/") and (ROOT / name).is_file()
     }
     relative = {name.removeprefix(SDIST_PREFIX) for name in _sdist_files(artifacts.sdist)}
     assert tracked - relative == set()

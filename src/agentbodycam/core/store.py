@@ -74,6 +74,9 @@ _CREATE_ATTEMPTS = 5
 # Windows refuses to replace a file another process has open for an instant (e.g. a
 # reader of session.json or active.json); such a replace is retried for this long.
 _REPLACE_RETRY_SECONDS = 2.0
+# A plain bool (not an inline platform check) so that type checkers on every platform
+# still analyse the retry loop below.
+_RETRY_REPLACE = sys.platform == "win32"
 
 
 class StoreError(Exception):
@@ -199,7 +202,7 @@ def _replace(tmp: Path, path: Path) -> None:
             tmp.replace(path)
             return
         except PermissionError:
-            if sys.platform != "win32" or time.monotonic() >= deadline:
+            if not _RETRY_REPLACE or time.monotonic() >= deadline:
                 raise
         time.sleep(backoff)
         backoff = min(backoff * 2, 0.05)

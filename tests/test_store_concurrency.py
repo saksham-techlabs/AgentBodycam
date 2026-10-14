@@ -22,7 +22,7 @@ from agentbodycam.core.store import (
 )
 from agentbodycam.models.events import EventDraft, EventSource, EventType
 from agentbodycam.models.session import InvalidSessionIdError
-from recording_helpers import try_symlink
+from recording_helpers import make_junction, try_symlink
 
 WRITERS = 6
 EVENTS_PER_WRITER = 150
@@ -226,12 +226,10 @@ def test_symlinked_locks_dir_is_rejected(store: EventStore, tmp_path: Path) -> N
 
 @pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
 def test_junctioned_locks_dir_is_rejected(store: EventStore, tmp_path: Path) -> None:
-    import _winapi
-
     sid = store.create_session().session_id
     outside = tmp_path / "outside"
     outside.mkdir()
-    _winapi.CreateJunction(str(outside), str(store.locks_dir))
+    make_junction(store.locks_dir, outside)
     with pytest.raises(UnsafePathError):
         store.append_event(sid, draft(0, 0))
     assert list(outside.iterdir()) == []

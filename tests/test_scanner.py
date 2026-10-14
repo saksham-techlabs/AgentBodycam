@@ -28,7 +28,14 @@ from agentbodycam.core.scanner import (
 )
 from agentbodycam.core.store import EventStore
 from agentbodycam.models.events import EventType
-from recording_helpers import all_events, file_events, store_bytes, try_symlink, write
+from recording_helpers import (
+    all_events,
+    file_events,
+    make_junction,
+    store_bytes,
+    try_symlink,
+    write,
+)
 
 WINDOWS_ONLY = pytest.mark.skipif(sys.platform != "win32", reason="Windows-only behaviour")
 
@@ -134,13 +141,11 @@ def test_symlinks_are_never_followed(
 def test_junctions_are_never_followed(
     tmp_path: Path, make_store: Callable[[Path], EventStore]
 ) -> None:
-    import _winapi
-
     project = tmp_path / "project"
     outside = tmp_path / "outside"
     write(outside / "secret.txt", "outside data")
     write(project / "real.txt", "inside")
-    _winapi.CreateJunction(str(outside), str(project / "junction"))
+    make_junction(project / "junction", outside)
     assert (project / "junction" / "secret.txt").exists()  # the junction really works
 
     assert set(ProjectScanner(project).scan({}).files) == {"real.txt"}

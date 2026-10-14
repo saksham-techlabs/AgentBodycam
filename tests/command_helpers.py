@@ -54,7 +54,10 @@ def wait_until(predicate: Callable[[], bool], timeout: float = 60, what: str = "
 
 def new_group_flags() -> int:
     """Windows: a new process group, so a console control event can target only it."""
-    return subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    if sys.platform == "win32":
+        return subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        return 0
 
 
 def interrupt(proc: subprocess.Popen[str]) -> None:

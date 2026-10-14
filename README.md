@@ -106,6 +106,12 @@ See [docs/product-scope.md](docs/product-scope.md) and
   available)
 - Windows, Linux or macOS
 
+Supported targets are Windows, Linux and macOS with Python 3.11-3.14, and the CI
+configuration in `.github/workflows/` tests every combination. That CI has not run yet
+(the repository is not published), so so far only Windows with Python 3.13 and 3.14 has
+been verified. Linux and macOS are intended and covered by the test suite, but not yet
+confirmed.
+
 ## Install (from source, for development)
 
 ```bash
@@ -582,9 +588,9 @@ python -m mypy
 python -m pytest
 ```
 
-The Replay UI source lives in `web/` (React + TypeScript + Vite; Node.js 20+ is needed only
-to work on it). Its production build is committed to `src/agentbodycam/ui/static/` and
-shipped inside the Python package:
+The Replay UI source lives in `web/` (React + TypeScript + Vite; Node.js 22.13+ or 24+ is
+needed only to work on it). Its production build is committed to
+`src/agentbodycam/ui/static/` and shipped inside the Python package:
 
 ```bash
 cd web

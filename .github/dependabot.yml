@@ -1,0 +1,22 @@
+# Weekly, grouped, never auto-merged. Python is not listed: the package has no runtime
+# dependencies and the dev tools in pyproject.toml are lower bounds only (no lock file),
+# so CI already installs their latest releases on every run.
+version: 2
+updates:
+  - package-ecosystem: npm
+    directory: /web
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      web-minor-and-patch:
+        update-types: [minor, patch]
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    open-pull-requests-limit: 5
+    groups:
+      github-actions:
+        patterns: ["*"]

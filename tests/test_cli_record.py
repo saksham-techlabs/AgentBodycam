@@ -128,7 +128,10 @@ def test_record_subprocess_stops_cleanly_on_ctrl_c(tmp_path: Path) -> None:
     project.mkdir(parents=True)
     write(project / "app.py", "v1\n")
     env = {**os.environ, "PYTHONIOENCODING": "utf-8", "PYTHONUNBUFFERED": "1"}
-    flags = subprocess.CREATE_NEW_PROCESS_GROUP if sys.platform == "win32" else 0
+    if sys.platform == "win32":
+        flags = subprocess.CREATE_NEW_PROCESS_GROUP
+    else:
+        flags = 0
     proc = subprocess.Popen(  # noqa: S603 - fixed interpreter and test-controlled arguments
         [
             sys.executable,
@@ -158,7 +161,10 @@ def test_record_subprocess_stops_cleanly_on_ctrl_c(tmp_path: Path) -> None:
         _wait_for(lines, "src/new file.py", seen)
         # Windows cannot deliver Ctrl+C to a separate process group; Ctrl+Break is the
         # equivalent console interrupt and takes the same clean-stop path.
-        os.kill(proc.pid, signal.CTRL_BREAK_EVENT if sys.platform == "win32" else signal.SIGINT)
+        if sys.platform == "win32":
+            os.kill(proc.pid, signal.CTRL_BREAK_EVENT)
+        else:
+            os.kill(proc.pid, signal.SIGINT)
         proc.wait(timeout=30)
     finally:
         if proc.poll() is None:

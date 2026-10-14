@@ -274,6 +274,15 @@ Out of scope (AgentBodycam cannot defend against them):
   This is a performance limitation, not a security issue.
 - No release has been made and no independent security audit has taken place yet.
 
+## Automated checks
+
+The security and privacy regression tests (path safety, command redaction, Replay
+authentication and browser protections, static file serving, export privacy, repository
+hygiene and the no-network guarantees) are part of the normal test suite. They are not
+optional: `python scripts/check.py` runs them, and the CI configuration runs it on Windows,
+Linux and macOS with every supported Python version. CI workflows have read-only
+repository access and use no secrets.
+
 ## Reporting a vulnerability
 
 Please do **not** open a public issue for security problems.
@@ -281,6 +290,10 @@ Please do **not** open a public issue for security problems.
 Until a dedicated private reporting channel is published in this file, contact the
 maintainer privately through the contact details listed on the project's hosting page.
 Include steps to reproduce, affected version/commit and potential impact.
+
+Do not send real session recordings (`.agentbodycam/` directories, `events.jsonl`,
+`session.json`), exports of private projects, tokens or other secrets. Reproduce the
+problem with a small throwaway project, or describe it, and redact paths and names.
 
 You can expect an initial acknowledgement on a best-effort basis; this is a volunteer
 project with no guaranteed response time.

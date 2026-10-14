@@ -34,7 +34,14 @@ from agentbodycam.core.store import EventStore, UnsafePathError
 from agentbodycam.models.events import JsonObject
 from agentbodycam.models.session import SessionStatus
 from git_helpers import commit_all, init_repo, requires_git
-from recording_helpers import all_events, file_events, hard_kill_pid, try_symlink, write
+from recording_helpers import (
+    all_events,
+    file_events,
+    hard_kill_pid,
+    make_junction,
+    try_symlink,
+    write,
+)
 
 SESSION_LINE = re.compile(r"^Session: (\S+)$", re.MULTILINE)
 
@@ -400,11 +407,9 @@ def test_symlinked_active_lock_is_rejected(
 
 @pytest.mark.skipif(sys.platform != "win32", reason="junctions are Windows-only")
 def test_junctioned_store_is_rejected(project: Path, tmp_path: Path) -> None:
-    import _winapi
-
     outside = tmp_path / "outside"
     outside.mkdir()
-    _winapi.CreateJunction(str(outside), str(project / ".agentbodycam"))
+    make_junction(project / ".agentbodycam", outside)
     with pytest.raises(UnsafePathError):
         get_active_session(project)
     with pytest.raises(UnsafePathError):

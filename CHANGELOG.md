@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Cross-platform CI configuration (not run yet: the repository is not published).
+  `.github/workflows/ci.yml` runs `python scripts/check.py` on Windows, Linux and macOS
+  with Python 3.11-3.14 (fail-fast off), a frontend job on Node 22 and 24 (`npm ci`,
+  typecheck, test, build, and a check that the build reproduces the committed
+  `src/agentbodycam/ui/static/` exactly), and a packaging job that builds the wheel and
+  sdist, runs `tests/test_packaging.py` against exactly those files and uploads them as a
+  7-day workflow artifact. `release-build.yml` (manual only) reuses it and keeps the
+  artifacts for 30 days; nothing publishes, tags or releases. Read-only permissions, no
+  secrets, official actions only. Dependabot (weekly, grouped, npm and GitHub Actions),
+  issue and pull request templates, and `docs/release-checklist.md`.
+- `AGENTBODYCAM_TEST_DIST=<dir>` makes the packaging tests inspect and install prebuilt
+  artifacts instead of building their own. New tests: the web UI version matches the
+  Python package version, and the workflows stay read-only, publish nothing, use only
+  official actions and cover every classified Python version.
 - Browser-local **WebM replay clip** export. The Export panel now offers Share card,
   **Replay clip** (WebM · 1280×720) and JSON summary. The replay clip is a generated
   animation of recorded evidence, not a screen capture: an intro, session stats, the
@@ -252,6 +266,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- The documented Node.js requirement for building the Replay UI was wrong (20+). The
+  locked toolchain (Vitest 5, jsdom 29) needs Node 22.13+ or 24+; `engines` in
+  `web/package.json`, README and CONTRIBUTING now say so. README separates the supported
+  targets (Windows, Linux, macOS; Python 3.11-3.14) from what has been verified so far
+  (Windows, Python 3.13 and 3.14).
 - Release packaging hardening (no new features, version unchanged at 0.0.1): the sdist is
   built from an explicit allowlist in `pyproject.toml`, so untracked local files in a
   checkout (notes, screenshots, exports) can no longer end up in it. New
@@ -311,6 +330,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Strict mypy failed on Linux and macOS (8 errors; tests and runtime were unaffected): a
+  platform check inside a boolean expression made the Windows `session.json` replace
+  retry look unreachable, and tests used Windows-only attributes (`CTRL_BREAK_EVENT`,
+  `CREATE_NEW_PROCESS_GROUP`, `_winapi.CreateJunction`) outside statement-level platform
+  checks. Behaviour is unchanged. `scripts/check.py` now type-checks for Windows, Linux
+  and macOS (`mypy --platform`) on every OS, so this is caught locally.
 - Replay UI reliability hardening (no new features; forensic semantics, API and privacy
   rules unchanged):
   - WebM export: a second click on Export WebM in a narrow dialog could land on Cancel,

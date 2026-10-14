@@ -1,4 +1,5 @@
-"""Run every quality gate: formatting, linting, type checking and tests.
+"""Run every quality gate: formatting, linting, type checking (for Windows, Linux and macOS)
+and tests.
 
 Usage:
     python scripts/check.py          # verify only
@@ -30,9 +31,13 @@ def main(argv: list[str]) -> int:
     steps += [
         ("format-check", ["ruff", "format", "--check", "."]),
         ("lint", ["ruff", "check", "."]),
-        ("types", ["mypy"]),
-        ("tests", ["pytest"]),
     ]
+    # mypy only analyses the current platform's branches; check all three from any OS.
+    steps += [
+        (f"types ({p})", ["mypy", "--platform", p, "--cache-dir", f".mypy_cache/{p}"])
+        for p in ("win32", "linux", "darwin")
+    ]
+    steps += [("tests", ["pytest"])]
 
     failed = [label for label, args in steps if not _run(label, args)]
     print()

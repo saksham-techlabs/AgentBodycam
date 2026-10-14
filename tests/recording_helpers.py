@@ -46,6 +46,16 @@ def hard_kill_pid(pid: int) -> None:
         os.kill(pid, signal.SIGKILL)
 
 
+def make_junction(link: Path, target: Path) -> None:
+    """Create a Windows directory junction (callers skip on other platforms)."""
+    if sys.platform == "win32":
+        import _winapi
+
+        _winapi.CreateJunction(str(target), str(link))
+    else:
+        raise OSError("directory junctions exist only on Windows")
+
+
 def try_symlink(link: Path, target: Path, *, directory: bool = False) -> bool:
     try:
         link.symlink_to(target, target_is_directory=directory)

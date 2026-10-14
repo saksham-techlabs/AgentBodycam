@@ -301,7 +301,7 @@ def live(project: Path) -> Iterator[Recorder]:
 
 
 def _interrupt_wrapper(proc: subprocess.Popen[str], sig: int | None = None) -> None:
-    if WINDOWS:
+    if sys.platform == "win32":
         # Ctrl+Break to the wrapper's own process group, which (exactly like a console
         # Ctrl+C) reaches the wrapper and the child it started.
         os.kill(proc.pid, signal.CTRL_BREAK_EVENT)

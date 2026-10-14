@@ -1,0 +1,19 @@
+# Manually triggered: runs the full CI (frontend, every OS x Python job, packaging) and keeps
+# the verified wheel and sdist as a workflow artifact for 30 days.
+#
+# It only builds. It does not publish to any package index, create a GitHub Release, push
+# tags or modify the repository; those steps are manual (docs/release-checklist.md).
+name: Release build
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  ci:
+    name: CI and release artifacts
+    uses: ./.github/workflows/ci.yml
+    with:
+      artifact-retention-days: 30
