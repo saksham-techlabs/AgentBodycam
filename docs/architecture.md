@@ -14,9 +14,9 @@
 > (`agentbodycam replay`, section 3.6: app shell, connection status, session dashboard,
 > overview, paginated forensic timeline with first-failure / recovery / unresolved
 > markers, replay playback controls and scrubber, findings, observed files and last
-> recorded Git / final state). Capture of commands not launched through
-> `agentbodycam run`, adapters, the final cinematic replay styling, file contents and
-> diffs, export and AI are not implemented.
+> recorded Git / final state, with the replay styled as a sticky "replay theater").
+> Capture of commands not launched through `agentbodycam run`, adapters, file contents
+> and diffs, export and AI are not implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -1140,7 +1140,40 @@ and not real-time: timestamps are display metadata only.
   re-renders only the rows whose current/selected state changed; marker and important-
   event lists are recomputed only when pages or the report change.
 
-**Not implemented yet.** The final cinematic visual polish (10C.2), file contents and diff
+**Implemented (10C.2A): replay visual styling.** Presentation only; the playback engine,
+timing model, pagination, API and event schemas are unchanged.
+
+- *Replay theater* (`views/PlaybackBar.tsx`, `styles/app.css`): the controls, counter,
+  status, scrubber, marker rail and current event form one block that is
+  `position: sticky` directly below the top bar (`--topbar-height`; the top bar keeps a
+  single line where the theater is sticky) when the window is at least 900 × 720 px.
+  There the timeline gets a height (`--replay-timeline-height`) that keeps its rows
+  below the theater at every scroll position, and the detail panel scrolls on its own
+  (beside the timeline above 1100 px, capped below the theater when stacked). Smaller
+  windows get a normal, non-sticky theater with wrapping controls. An opaque square
+  underlay behind the rounded surface keeps scrolled content from showing at its corners
+  (no backdrop blur). No scroll listeners.
+- *Current-event hero*: same safe `TimelineItem` fields as before. Its emphasis comes from
+  `replayMoment()` (`lib/playback.ts`), which reads only report markers, then the recorded
+  event type: first observable failure (strongest red), unresolved and other failures
+  (red), observed recovery and passing checks (green), observed errors (amber), anything
+  else (neutral blue). Never summary text.
+- *Timeline rows*: CURRENT (playback cursor: left bar in the row's evidence colour, tint,
+  visible CURRENT tag, ▶ before the sequence) and SELECTED (detail panel: neutral ring,
+  DETAIL tag, `aria-current`) are composed independently; the rail is drawn per row and
+  tinted up to the cursor.
+- *Scrubber*: dotted known-but-unloaded span, hatched loaded span, blue played span, a
+  haloed thumb and a small legend; the marker of the current event is enlarged. Same
+  native range input and roving-tabindex marker toolbar.
+- *Status and controls*: status chips carry a decorative dot (pulsing only while playing
+  or loading); LIVE EDGE stays informational. Play / Pause / Replay is the primary
+  button, single steps secondary, important-event navigation tertiary; speed is a compact
+  group; shortcuts are a quiet key hint.
+- *Motion*: 140-200 ms transitions (played span, rows, markers) and a short fade of the
+  hero body per event. With `prefers-reduced-motion: reduce` the hero fade and pulse are
+  not applied (JS) and all transitions and animations are off (CSS).
+
+**Not implemented yet.** Possible final micro-polish (10C.2B), file contents and diff
 viewer, export and sharing (cards, GIF, video).
 
 **API client** (`web/src/api/`). GET only, `cache: "no-store"`, `credentials:
@@ -1214,8 +1247,8 @@ Testing Library (`npm run test`) against a fake server that mirrors the real rou
 `tests/test_replay_ui.py` for serving, headers, path safety, bootstrap, the CLI and
 wheel packaging.
 
-Still to come: the final cinematic styling of the replay, file/diff views, export, and
-clearly different styling of facts and inferences (section 2).
+Still to come: possible final micro-polish of the replay view, file/diff views, export,
+and clearly different styling of facts and inferences (section 2).
 
 ### 3.7 Share / export pipeline
 

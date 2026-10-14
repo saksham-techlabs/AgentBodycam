@@ -241,6 +241,7 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
                     markers={markers}
                     live={live}
                     pageError={timeline.error}
+                    reducedMotion={reducedMotion}
                     onSeek={onSeek}
                   />
                   <TimelineView

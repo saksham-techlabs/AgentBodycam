@@ -5,6 +5,7 @@ import type { Playback, SeekTarget } from "../hooks/usePlayback";
 import { describeError } from "../lib/errorMessages";
 import { formatCount, plural } from "../lib/format";
 import {
+  MOMENT_TONES,
   PLAYBACK_SPEEDS,
   adjacentImportant,
   formatSpeed,
@@ -12,6 +13,7 @@ import {
   isOwnSpaceControl,
   isTextEntry,
   markerPercent,
+  replayMoment,
   scrubberMarkers,
   type ImportantEvent,
   type ScrubberMarker,
@@ -25,15 +27,17 @@ interface PlaybackBarProps {
   live: boolean;
   /** Error of the latest timeline page request, shown when playback stalled on it. */
   pageError: unknown;
+  reducedMotion: boolean;
   onSeek: (target: SeekTarget) => void;
 }
 
 /**
- * Replay controls over the recorded event log: play/pause, step, important-event
- * navigation, speed, a sequence-based scrubber and the event currently being replayed.
+ * The replay theater: play/pause, step, important-event navigation, speed, a
+ * sequence-based scrubber and the event currently being replayed, in one sticky block.
  * This replays recorded evidence events; there is no screen video.
  */
-export function PlaybackBar({ playback, important, markers, live, pageError, onSeek }: PlaybackBarProps) {
+export function PlaybackBar(props: PlaybackBarProps) {
+  const { playback, important, markers, live, pageError, reducedMotion, onSeek } = props;
   const { current, playing, ended, total } = playback;
   const sequence = current?.sequence ?? 0;
   const previous = adjacentImportant(important, sequence, -1);
@@ -52,9 +56,25 @@ export function PlaybackBar({ playback, important, markers, live, pageError, onS
 
   const empty = playback.loaded === 0;
   const playLabel = playing ? "Pause" : ended ? "Replay" : "Play";
+  const moment = current === null ? null : replayMoment(current, markersFor(markers, current));
 
   return (
-    <section className="playback" aria-label="Replay controls" data-testid="playback">
+    <section
+      className={playing ? "playback replay-theater is-playing" : "playback replay-theater"}
+      aria-label="Replay controls"
+      data-testid="playback"
+      data-state={statusOf(playback).state}
+      data-moment={moment ?? "none"}
+      data-motion={reducedMotion ? "reduced" : "full"}
+    >
+      <div className="theater-head">
+        <p className="theater-title">
+          <span className="theater-mark" aria-hidden="true" />
+          Replay
+        </p>
+        <p className="theater-sub">Recorded evidence events, one step per event, in sequence order</p>
+        <ShortcutHint />
+      </div>
       <div className="playback-row">
         <div className="playback-buttons">
           <button
@@ -68,47 +88,52 @@ export function PlaybackBar({ playback, important, markers, live, pageError, onS
             <span className={playing ? "play-glyph is-pause" : "play-glyph"} aria-hidden="true" />
             {playLabel}
           </button>
-          <button
-            type="button"
-            className="button button-small"
-            onClick={() => void playback.step(-1)}
-            disabled={empty || playback.position === null || playback.position === 0}
-            aria-label="Previous event"
-          >
-            ‹
-          </button>
-          <button
-            type="button"
-            className="button button-small"
-            onClick={() => void playback.step(1)}
-            disabled={empty || playback.atEnd}
-            aria-label="Next event"
-          >
-            ›
-          </button>
-          <button
-            type="button"
-            className="button button-small"
-            onClick={() => goImportant(-1)}
-            disabled={previous === null}
-            aria-label="Previous important event"
-          >
-            Prev important
-          </button>
-          <button
-            type="button"
-            className="button button-small"
-            onClick={() => goImportant(1)}
-            disabled={next === null}
-            aria-label="Next important event"
-          >
-            Next important
-          </button>
+          <span className="control-group">
+            <button
+              type="button"
+              className="button button-step"
+              onClick={() => void playback.step(-1)}
+              disabled={empty || playback.position === null || playback.position === 0}
+              aria-label="Previous event"
+            >
+              ‹
+            </button>
+            <button
+              type="button"
+              className="button button-step"
+              onClick={() => void playback.step(1)}
+              disabled={empty || playback.atEnd}
+              aria-label="Next event"
+            >
+              ›
+            </button>
+          </span>
+          <span className="control-group">
+            <button
+              type="button"
+              className="button button-ghost"
+              onClick={() => goImportant(-1)}
+              disabled={previous === null}
+              aria-label="Previous important event"
+            >
+              <span aria-hidden="true">⇤</span> Prev important
+            </button>
+            <button
+              type="button"
+              className="button button-ghost"
+              onClick={() => goImportant(1)}
+              disabled={next === null}
+              aria-label="Next important event"
+            >
+              Next important <span aria-hidden="true">⇥</span>
+            </button>
+          </span>
         </div>
         <span className="playback-counter mono" data-testid="playback-counter">
-          {current === null ? "—" : `#${formatCount(current.sequence)}`} / {formatCount(total)}
+          <span className="counter-now">{current === null ? "—" : `#${formatCount(current.sequence)}`}</span>
+          <span className="counter-of"> / {formatCount(total)}</span>
         </span>
-        <StatusChip playback={playback} />
+        <StatusChip playback={playback} reducedMotion={reducedMotion} />
         <div className="playback-options">
           <div className="segmented" role="group" aria-label="Playback speed">
             {PLAYBACK_SPEEDS.map((speed) => (
@@ -144,11 +169,13 @@ export function PlaybackBar({ playback, important, markers, live, pageError, onS
           is kept.
         </p>
       ) : null}
-      <CurrentEvent playback={playback} markers={markers} live={live} pageError={pageError} />
-      <p className="playback-keys">
-        <kbd>Space</kbd> play/pause · <kbd>←</kbd> <kbd>→</kbd> event · <kbd>Shift</kbd>+
-        <kbd>←</kbd> <kbd>→</kbd> important event
-      </p>
+      <CurrentEvent
+        playback={playback}
+        markers={markers}
+        live={live}
+        pageError={pageError}
+        reducedMotion={reducedMotion}
+      />
       <p className="visually-hidden" role="status" aria-live="polite" data-testid="playback-announcement">
         {announcement(playback)}
       </p>
@@ -169,24 +196,57 @@ function announcement(p: Playback): string {
   return `Playback paused at ${at}.`;
 }
 
-function StatusChip({ playback: p }: { playback: Playback }) {
-  const [text, tone] = p.seeking
-    ? ["LOADING EVENTS…", "info"]
-    : p.loadingNext
-      ? ["LOADING NEXT PAGE…", "info"]
-      : p.stalled
-        ? ["PAUSED · PAGE NOT LOADED", "warning"]
-        : p.playing
-          ? ["PLAYING", "info"]
-          : p.liveEdge
-            ? ["LIVE EDGE", "info"]
-            : p.ended
-              ? ["END OF RECORDING", "neutral"]
-              : ["PAUSED", "muted"];
+interface PlaybackStatus {
+  text: string;
+  tone: string;
+  state: "loading" | "stalled" | "playing" | "live-edge" | "ended" | "paused";
+}
+
+function statusOf(p: Playback): PlaybackStatus {
+  if (p.seeking) return { text: "LOADING EVENTS…", tone: "info", state: "loading" };
+  if (p.loadingNext) return { text: "LOADING NEXT PAGE…", tone: "info", state: "loading" };
+  if (p.stalled) return { text: "PAUSED · PAGE NOT LOADED", tone: "warning", state: "stalled" };
+  if (p.playing) return { text: "PLAYING", tone: "info", state: "playing" };
+  if (p.liveEdge) return { text: "LIVE EDGE", tone: "info", state: "live-edge" };
+  if (p.ended) return { text: "END OF RECORDING", tone: "neutral", state: "ended" };
+  return { text: "PAUSED", tone: "muted", state: "paused" };
+}
+
+function StatusChip({ playback, reducedMotion }: { playback: Playback; reducedMotion: boolean }) {
+  const { text, tone, state } = statusOf(playback);
+  const active = state === "playing" || state === "loading";
   return (
-    <span className={`playback-status chip tone-${tone}`} data-testid="playback-status">
+    <span
+      className={`playback-status chip tone-${tone}`}
+      data-testid="playback-status"
+      data-state={state}
+    >
+      <span
+        className={active && !reducedMotion ? "status-dot pulse" : "status-dot"}
+        aria-hidden="true"
+        data-testid="status-dot"
+      />
       {text}
     </span>
+  );
+}
+
+function ShortcutHint() {
+  return (
+    <p className="playback-keys">
+      <span className="key-hint">
+        <kbd>Space</kbd> Play/Pause
+      </span>
+      <span className="key-hint">
+        <kbd>←</kbd>
+        <kbd>→</kbd> Step
+      </span>
+      <span className="key-hint">
+        <kbd>Shift</kbd>
+        <kbd>←</kbd>
+        <kbd>→</kbd> Important event
+      </span>
+    </p>
   );
 }
 
@@ -230,13 +290,16 @@ function Scrubber({
     current === null && pending === null
       ? `No event selected; ${plural(total, "event")} recorded, ${formatCount(loaded)} loaded`
       : `Event ${formatCount(value)} of ${formatCount(total)}; ${formatCount(loaded)} loaded`;
+  const classes = ["scrubber"];
+  if (current === null && pending === null) classes.push("is-idle");
+  if (pending !== null) classes.push("is-pending");
 
   return (
-    <div className="scrubber" data-testid="scrubber">
+    <div className={classes.join(" ")} data-testid="scrubber">
       <div className="scrub-track-wrap">
         <div className="scrub-track" aria-hidden="true">
           <span className="scrub-loaded" style={{ width: `${loadedPct}%` }} data-testid="scrub-loaded" />
-          <span className="scrub-played" style={{ width: `${playedPct}%` }} />
+          <span className="scrub-played" style={{ width: `${playedPct}%` }} data-testid="scrub-played" />
         </div>
         <input
           type="range"
@@ -255,9 +318,17 @@ function Scrubber({
           data-testid="scrubber-input"
         />
       </div>
-      <MarkerRail marks={marks} onSeek={onSeek} />
+      <MarkerRail marks={marks} currentSequence={current?.sequence ?? null} onSeek={onSeek} />
       <div className="scrub-scale mono">
         <span>#1</span>
+        <span className="scrub-legend" aria-hidden="true">
+          <span className="legend-item lg-played">played</span>
+          <span className="legend-item lg-loaded">loaded</span>
+          <span className="legend-item lg-known">not loaded</span>
+          <span className="legend-item lg-failure">failure</span>
+          <span className="legend-item lg-recovered">recovery</span>
+          <span className="legend-item lg-unresolved">unresolved</span>
+        </span>
         <span data-testid="scrub-loaded-label">
           {formatCount(loaded)} / {formatCount(total)} loaded
           {pending === null ? null : ` · release to load up to #${formatCount(pending)}`}
@@ -271,9 +342,11 @@ function Scrubber({
 /** Marker buttons in one tab stop; arrow keys move between them (roving tabindex). */
 function MarkerRail({
   marks,
+  currentSequence,
   onSeek,
 }: {
   marks: readonly ScrubberMarker[];
+  currentSequence: number | null;
   onSeek: (target: SeekTarget) => void;
 }) {
   const [active, setActive] = useState(0);
@@ -309,7 +382,9 @@ function MarkerRail({
             refs.current[i] = el;
           }}
           type="button"
-          className={`scrub-marker mk-${m.kind.replace("_", "-")} tone-${m.tone}`}
+          className={`scrub-marker mk-${m.kind.replace("_", "-")} tone-${m.tone}${
+            m.sequence === currentSequence ? " is-current" : ""
+          }`}
           style={{ left: `${m.percent}%` }}
           tabIndex={i === index ? 0 : -1}
           aria-label={`${m.label}, event #${formatCount(m.sequence)}`}
@@ -339,56 +414,88 @@ function idleText(playback: Playback, live: boolean, pageError: unknown): string
   return `Press Play to step through the ${plural(playback.total, "recorded event")} in sequence order.`;
 }
 
+/**
+ * The focal point of the replay: the current event's safe fields. Its accent follows the
+ * evidence (report markers, then event type); the body re-mounts per event so it can fade
+ * in, unless reduced motion is requested.
+ */
 function CurrentEvent({
   playback,
   markers,
   live,
   pageError,
+  reducedMotion,
 }: {
   playback: Playback;
   markers: MarkerIndex;
   live: boolean;
   pageError: unknown;
+  reducedMotion: boolean;
 }) {
   const item = playback.current;
   if (item === null) {
+    const waiting = !playback.ready && pageError === null;
     return (
-      <section className="now-card is-idle" aria-label="Current replay event" data-testid="current-event">
-        <p className="eyebrow">Now replaying</p>
-        <p className="dim">
-          {idleText(playback, live, pageError)} Each step shows one recorded evidence event; no
-          screen video is recorded.
-        </p>
+      <section
+        className={waiting ? "now-card is-idle is-waiting" : "now-card is-idle"}
+        aria-label="Current replay event"
+        data-testid="current-event"
+        data-moment="none"
+      >
+        <div className="hero-index" aria-hidden="true">
+          <span className="hero-seq mono">#—</span>
+        </div>
+        <div className="hero-body">
+          <p className="eyebrow">Now replaying</p>
+          <p className="dim">
+            {idleText(playback, live, pageError)} Each step shows one recorded evidence event; no
+            screen video is recorded.
+          </p>
+        </div>
       </section>
     );
   }
   const kind = eventPresentation(item);
   const found = markersFor(markers, item);
+  const moment = replayMoment(item, found);
   return (
     <section
-      className={`now-card tone-${kind.tone}`}
+      className={`now-card tone-${MOMENT_TONES[moment]} moment-${moment}`}
       aria-label="Current replay event"
       data-testid="current-event"
+      data-moment={moment}
     >
-      <div className="now-head">
+      <div className="hero-index">
         <p className="eyebrow">Now replaying</p>
-        <span className="mono now-seq">#{formatCount(item.sequence)}</span>
-        <span className="mono now-time">{formatClock(item.timestamp)} UTC</span>
-        <Chip tone={kind.tone}>{kind.label}</Chip>
-        <span className="mono now-type">{item.type}</span>
-        <span className="evidence-badge">{item.evidence.toUpperCase()}</span>
+        <span className="hero-seq mono now-seq">#{formatCount(item.sequence)}</span>
+        <span className="hero-of mono">of {formatCount(playback.total)}</span>
       </div>
-      <p className="now-summary">{item.summary}</p>
-      {item.path === null && found.length === 0 ? null : (
+      <div
+        key={item.event_id}
+        className={reducedMotion ? "hero-body" : "hero-body is-entering"}
+        data-testid="current-event-body"
+      >
+        <div className="now-head">
+          <Chip tone={kind.tone}>{kind.label}</Chip>
+          <span className="mono now-type">{item.type}</span>
+          <span className="mono now-time">{formatClock(item.timestamp)} UTC</span>
+          <span className="evidence-badge">{item.evidence.toUpperCase()}</span>
+        </div>
+        <p className="now-summary" title={item.summary}>
+          {item.summary}
+        </p>
         <div className="now-meta">
           {item.path === null ? null : <span className="mono now-path">{item.path}</span>}
           {found.map((marker) => (
-            <Chip key={`${marker.kind}-${marker.label}`} tone={marker.tone}>
+            <span
+              key={`${marker.kind}-${marker.label}`}
+              className={`chip tone-${marker.tone} hero-marker mk-${marker.kind.replace("_", "-")}`}
+            >
               {marker.label}
-            </Chip>
+            </span>
           ))}
         </div>
-      )}
+      </div>
     </section>
   );
 }

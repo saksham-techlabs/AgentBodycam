@@ -13,8 +13,8 @@
 > local Replay UI under development (`agentbodycam replay`: dashboard, session overview,
 > paginated forensic timeline with failure / recovery / unresolved markers, replay
 > playback controls and a scrubber, findings, observed files and the last recorded Git /
-> final state). It does not observe arbitrary terminal commands and does not integrate
-> with any specific agent. The final cinematic styling of the replay, file contents and
+> final state, presented as a cinematic replay view). It does not observe arbitrary
+> terminal commands and does not integrate with any specific agent. File contents and
 > diffs, share/export and an AI analyst do not exist yet. Expect breaking changes.
 >
 > Implemented:
@@ -29,9 +29,12 @@
 > - Replay playback (under development): play/pause, 0.5x-4x speed, a sequence-based
 >   scrubber with failure / recovery / unresolved markers, important-event navigation
 >   and keyboard shortcuts, over the recorded evidence events (no screen video exists)
+> - Replay visual styling: a sticky "replay theater" (controls, scrubber, current event)
+>   with evidence-driven emphasis for the first observable failure, observed recoveries
+>   and unresolved failures
 >
 > Still not implemented:
-> - final cinematic visual polish of the replay
+> - possible final micro-polish of the replay view
 > - file contents and diffs
 > - share/export (cards, GIF, video)
 > - agent-specific adapters
@@ -74,7 +77,7 @@ It is designed to be:
 | Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
 | Local forensics engine (`analyze`) | Implemented (deterministic, read-only, observed findings only) |
 | Local Replay API (`replay-api`) | Implemented (loopback only, temporary bearer token, read-only, standard library only) |
-| Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, replay playback controls and scrubber, findings, observed files, last recorded Git/final state; no final cinematic polish, no export |
+| Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, replay playback controls and scrubber in a sticky replay view, findings, observed files, last recorded Git/final state; no export |
 | Share/export | Not started |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
 | Optional AI analysis | Not started |
@@ -175,7 +178,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: agent integrations, final cinematic replay styling, export or AI.
+- Not yet: agent integrations, export or AI.
 
 ### Recording commands you run
 
@@ -400,7 +403,14 @@ run time). Today it shows:
   Keyboard: Space play/pause, ←/→ previous/next event, Shift+←/→ previous/next important
   event (not while typing). Further pages load automatically as playback reaches them;
   for a live recording, playback stops at the LIVE EDGE and only advances to newly
-  recorded events if you turn on "Follow live";
+  recorded events if you turn on "Follow live". On desktop-sized windows the controls,
+  scrubber and current event form one "replay theater" that stays below the top bar
+  while you scroll the timeline. Its colour follows the evidence: blue for an ordinary
+  event, green for a passing check or OBSERVED RECOVERY, red for a failure, the FIRST
+  OBSERVABLE FAILURE or UNRESOLVED IN THIS RECORDING, amber for an observed error. In the
+  timeline, CURRENT marks where playback is and DETAIL marks the event open in the
+  detail panel; the rail is tinted up to the current event. Decorative motion is
+  disabled when the operating system asks for reduced motion;
 - a **Findings** tab: first observable failure, observed recoveries (with the file changes
   observed between the failed and later passing runs), unresolved failures, incomplete
   commands, errors observed and evidence notes; every reference can jump to its event;
@@ -411,8 +421,8 @@ run time). Today it shows:
 All findings are observed facts from the recording: the UI never attributes a failure or
 a recovery to a file change. While a session is live the report and timeline refresh
 every 2.5 s (never overlapping, paused while the browser tab is hidden); playback pauses
-too while the tab is hidden. The final cinematic visual polish of the replay, file
-contents and diffs, GIF/video export and sharing are **not implemented yet**.
+too while the tab is hidden. File contents and diffs, GIF/video export and sharing are
+**not implemented yet**.
 
 How the page gets API access: the page asks its own server for the temporary token with a
 same-origin `fetch()` (`GET /ui/bootstrap`, which requires a custom header and browser

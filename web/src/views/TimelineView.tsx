@@ -35,6 +35,7 @@ const OVERSCAN = 10;
 const FALLBACK_VIEWPORT = 960;
 const AUTOLOAD_DISTANCE = ROW_HEIGHT * 6;
 const MAX_ROW_CHIPS = 2;
+const SKELETON_ROWS = [46, 38, 54, 30, 42];
 
 export type JumpState =
   | { status: "idle" }
@@ -196,6 +197,8 @@ export function TimelineView(props: TimelineViewProps) {
   const last = Math.min(filtered.length, Math.ceil((viewport.top + viewport.height) / ROW_HEIGHT) + OVERSCAN);
   const visible = filtered.slice(first, last);
 
+  const currentPosition = currentId === null ? undefined : index.get(currentId);
+  const currentSequence = currentPosition === undefined ? 0 : (items[currentPosition]?.sequence ?? 0);
   const selectedPosition = selectedId === null ? undefined : index.get(selectedId);
   const selected = selectedPosition === undefined ? null : (items[selectedPosition] ?? null);
   const selectedRow = selectedId === null ? undefined : filteredIndex.get(selectedId);
@@ -222,12 +225,15 @@ export function TimelineView(props: TimelineViewProps) {
       <div className={selected === null ? "timeline-layout" : "timeline-layout has-detail"}>
         <div className="timeline-main">
           {pages === 0 && timeline.error === null ? (
-            <div className="state-loading" role="status">
+            <div className="state-loading timeline-skeleton" role="status">
               <span className="visually-hidden">Loading timeline…</span>
-              <div className="skeleton-row" aria-hidden="true">
-                <span className="skeleton w-12" />
-                <span className="skeleton w-40" />
-              </div>
+              {SKELETON_ROWS.map((width) => (
+                <div className="skeleton-row tl-skeleton-row" aria-hidden="true" key={width}>
+                  <span className="skeleton skel-seq" />
+                  <span className="skel-node" />
+                  <span className="skeleton" style={{ width: `${width}%` }} />
+                </div>
+              ))}
             </div>
           ) : pages > 0 && items.length === 0 ? (
             <EmptyState title="No events recorded">
@@ -262,6 +268,7 @@ export function TimelineView(props: TimelineViewProps) {
                     markers={markers}
                     selected={item.event_id === selectedId}
                     current={item.event_id === currentId}
+                    played={item.sequence < currentSequence}
                     tabbable={first + offset === tabbable}
                     onSelect={onSelect}
                   />
@@ -287,6 +294,7 @@ const Row = memo(function Row({
   markers,
   selected,
   current,
+  played,
   tabbable,
   onSelect,
 }: {
@@ -296,6 +304,8 @@ const Row = memo(function Row({
   markers: MarkerIndex;
   selected: boolean;
   current: boolean;
+  /** Before the playback cursor: its rail segment is drawn as already replayed. */
+  played: boolean;
   tabbable: boolean;
   onSelect: (eventId: string) => void;
 }) {
@@ -304,6 +314,7 @@ const Row = memo(function Row({
   const classes = ["tl-row", `tone-${kind.tone}`, `kind-${item.category}`];
   if (selected) classes.push("is-selected");
   if (current) classes.push("is-current");
+  if (played) classes.push("is-played");
   for (const marker of found) classes.push(`has-${marker.kind.replace("_", "-")}`);
   const shown = found.slice(0, MAX_ROW_CHIPS);
   return (
@@ -334,6 +345,12 @@ const Row = memo(function Row({
           <span className="tl-line">
             <span className="tl-kind">{kind.label}</span>
             <span className="tl-summary">{item.summary}</span>
+            {current || selected ? (
+              <span className="tl-tags" aria-hidden="true">
+                {current ? <span className="tl-tag tag-current">CURRENT</span> : null}
+                {selected ? <span className="tl-tag tag-selected">DETAIL</span> : null}
+              </span>
+            ) : null}
           </span>
           <span className="tl-line tl-meta">
             <span className="mono tl-time">{formatClock(item.timestamp)}</span>
@@ -449,7 +466,8 @@ function JumpNotice({ jump, onCancelJump, live }: TimelineViewProps) {
   if (jump.status === "idle") return null;
   if (jump.status === "loading") {
     return (
-      <div className="banner tone-info" role="status">
+      <div className="banner tone-info banner-busy" role="status">
+        <span className="busy-dot" aria-hidden="true" />
         Loading timeline pages up to event #{formatCount(jump.sequence)}…{" "}
         <button type="button" className="button button-small" onClick={onCancelJump}>
           Cancel
@@ -505,6 +523,7 @@ function Footer({
           disabled={loading}
           aria-busy={loading}
         >
+          {loading ? <span className="busy-dot" aria-hidden="true" /> : null}
           {loading ? "Loading…" : "Load more events"}
         </button>
       ) : (

@@ -14,6 +14,7 @@
 
 import type { ForensicReport, TimelineItem } from "../api/types";
 import type { Tone } from "./sessionState";
+import type { Marker } from "./timeline";
 
 // -- timing ----------------------------------------------------------------------------------
 
@@ -208,6 +209,45 @@ export function scrubberMarkers(
     });
   }
   return [...slots.values()].sort((a, b) => a.sequence - b.sequence);
+}
+
+// -- replay moment ---------------------------------------------------------------------------
+
+/**
+ * How the current event is emphasized in the replay view, from structured evidence only:
+ * report markers first, then the recorded event type. Never derived from summary text.
+ */
+export type ReplayMoment =
+  | "first-failure"
+  | "unresolved"
+  | "recovered"
+  | "failed"
+  | "passed"
+  | "warning"
+  | "event";
+
+export const MOMENT_TONES: Record<ReplayMoment, Tone> = {
+  "first-failure": "danger",
+  unresolved: "danger",
+  recovered: "success",
+  failed: "danger",
+  passed: "success",
+  warning: "warning",
+  event: "info",
+};
+
+export function replayMoment(
+  item: Pick<TimelineItem, "type">,
+  markers: readonly Pick<Marker, "kind">[],
+): ReplayMoment {
+  const has = (kind: Marker["kind"]): boolean => markers.some((m) => m.kind === kind);
+  if (has("first_failure")) return "first-failure";
+  if (has("unresolved")) return "unresolved";
+  if (has("recovered")) return "recovered";
+  if (has("failed_run") || item.type === "check.failed") return "failed";
+  if (item.type === "check.passed") return "passed";
+  if (item.type === "error.observed") return "warning";
+  return "event";
 }
 
 // -- keyboard --------------------------------------------------------------------------------

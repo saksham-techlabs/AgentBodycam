@@ -30,6 +30,19 @@
   --radius: 10px;
   --radius-sm: 6px;
   --sidebar-width: 248px;
+  --topbar-height: 56px;
+
+  /* Replay theater */
+  --replay-surface: linear-gradient(180deg, rgba(17, 25, 38, 0.96), rgba(9, 14, 22, 0.96));
+  --replay-edge: rgba(90, 167, 255, 0.26);
+  --replay-shadow: 0 12px 24px -16px rgba(0, 0, 0, 0.9);
+  --accent-soft: 8%;
+  --accent-strong: 15%;
+  --motion-fast: 140ms;
+  --motion-base: 200ms;
+  --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
+  /* Timeline height while the theater is sticky: it fits below the theater at any scroll. */
+  --replay-timeline-height: clamp(320px, calc(100vh - 440px), 860px);
 
   color-scheme: dark;
 }
@@ -312,7 +325,7 @@ a {
   align-items: center;
   justify-content: space-between;
   gap: 16px;
-  min-height: 56px;
+  min-height: var(--topbar-height);
   padding: 10px 28px;
   background: rgba(6, 9, 15, 0.86);
   backdrop-filter: blur(8px);
@@ -320,6 +333,7 @@ a {
 }
 
 .topbar-title {
+  flex: 1 1 auto;
   min-width: 0;
   font-weight: 600;
 }
@@ -348,12 +362,15 @@ a {
   white-space: nowrap;
 }
 
+/* One line: the sticky replay theater sits exactly --topbar-height below the top. */
 .topbar-meta {
   display: flex;
+  flex: none;
   align-items: center;
-  flex-wrap: wrap;
+  flex-wrap: nowrap;
   justify-content: flex-end;
   gap: 12px;
+  white-space: nowrap;
 }
 
 .topbar-note {
@@ -1048,49 +1065,189 @@ button.session-row:hover:not(:disabled) {
 .replay {
   display: flex;
   flex-direction: column;
-  gap: 12px;
+  gap: 14px;
   min-width: 0;
 }
 
-.playback {
+/*
+ * The replay theater: controls, scrubber and the current event as one block. Sticky below
+ * the top bar where the viewport is large enough (see the media query at the end).
+ */
+.replay-theater {
+  position: relative;
+  z-index: 4;
   display: flex;
   flex-direction: column;
   gap: 10px;
-  padding: 12px 14px;
+  padding: 11px 17px 15px;
+}
+
+/* An opaque square underlay, so rows scrolling behind never show at the rounded corners. */
+.replay-theater::before,
+.replay-theater::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+}
+
+.replay-theater::before {
+  z-index: -2;
+  background: var(--bg);
+}
+
+.replay-theater::after {
+  z-index: -1;
   border: 1px solid var(--border-strong);
+  border-top-color: var(--replay-edge);
   border-radius: var(--radius);
-  background: var(--panel);
+  background: var(--replay-surface);
+  box-shadow:
+    var(--replay-shadow),
+    inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.theater-head {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  min-width: 0;
+  padding-bottom: 8px;
+  border-bottom: 1px solid rgba(38, 51, 74, 0.6);
+}
+
+.theater-title {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  color: var(--text);
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.2em;
+  text-transform: uppercase;
+}
+
+/* A lens-like mark, lit while playing; never a "recording" dot. */
+.theater-mark {
+  width: 8px;
+  height: 8px;
+  border: 1.5px solid var(--text-3);
+  border-radius: 2px;
+  transition:
+    border-color var(--motion-base) ease,
+    background-color var(--motion-base) ease;
+}
+
+.replay-theater.is-playing .theater-mark {
+  border-color: var(--blue);
+  background: var(--blue);
+}
+
+.theater-sub {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  color: var(--text-3);
+  font-size: 12px;
+}
+
+.playback {
+  min-width: 0;
 }
 
 .playback-row {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px 14px;
+  gap: 10px 16px;
 }
 
 .playback-buttons {
   display: flex;
   align-items: center;
-  gap: 6px;
+  flex-wrap: wrap;
+  gap: 8px 10px;
 }
 
+.control-group {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  padding-left: 10px;
+  border-left: 1px solid var(--border);
+}
+
+/* Primary: play / pause / replay. */
 .play-button {
-  min-width: 96px;
+  min-width: 104px;
+  height: 34px;
   justify-content: center;
-  border-color: rgba(90, 167, 255, 0.55);
-  background: rgba(90, 167, 255, 0.12);
-  font-weight: 600;
+  border-color: transparent;
+  background: var(--blue);
+  color: #04101f;
+  font-weight: 650;
+  box-shadow: 0 1px 0 rgba(255, 255, 255, 0.18) inset;
+  transition:
+    background-color var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
 }
 
 .play-button:hover:not(:disabled) {
-  background: rgba(90, 167, 255, 0.2);
+  border-color: transparent;
+  background: #7ab9ff;
+}
+
+.replay-theater.is-playing .play-button {
+  background: rgba(90, 167, 255, 0.16);
+  color: var(--text);
+  box-shadow: inset 0 0 0 1px rgba(90, 167, 255, 0.6);
+}
+
+.replay-theater.is-playing .play-button:hover:not(:disabled) {
+  background: rgba(90, 167, 255, 0.24);
+}
+
+.play-button:focus-visible,
+.button-step:focus-visible,
+.button-ghost:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+/* Secondary: single-event steps. */
+.button-step {
+  justify-content: center;
+  width: 32px;
+  height: 30px;
+  padding: 0;
+  font-size: 17px;
+  line-height: 1;
+}
+
+/* Tertiary: important-event navigation. */
+.button-ghost {
+  height: 30px;
+  padding: 0 9px;
+  border-color: transparent;
+  background: transparent;
+  color: var(--text-2);
+  font-size: 12px;
+}
+
+.button-ghost:hover:not(:disabled) {
+  border-color: var(--border-strong);
+  background: rgba(17, 25, 38, 0.8);
+  color: var(--text);
 }
 
 .play-button:disabled,
+.playback .button-step:disabled,
+.playback .button-ghost:disabled,
 .playback .button-small:disabled {
   cursor: not-allowed;
-  opacity: 0.45;
+  opacity: 0.4;
 }
 
 .play-glyph {
@@ -1110,12 +1267,43 @@ button.session-row:hover:not(:disabled) {
 }
 
 .playback-counter {
+  display: inline-block;
   color: var(--text);
+  white-space: pre;
+}
+
+.counter-now {
+  font-size: 18px;
+  font-weight: 650;
+  letter-spacing: -0.01em;
+}
+
+.counter-of {
+  color: var(--text-3);
   font-size: 13px;
 }
 
 .playback-status {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  padding: 2px 8px;
   white-space: nowrap;
+}
+
+.status-dot {
+  width: 6px;
+  height: 6px;
+  flex: none;
+  border-radius: 50%;
+  background: currentColor;
+  opacity: 0.85;
+}
+
+.playback-status[data-state="paused"] .status-dot,
+.playback-status[data-state="ended"] .status-dot {
+  border-radius: 1px;
+  opacity: 0.6;
 }
 
 .playback-options {
@@ -1123,6 +1311,16 @@ button.session-row:hover:not(:disabled) {
   align-items: center;
   gap: 12px;
   margin-left: auto;
+}
+
+.playback-options .segmented {
+  flex-wrap: nowrap;
+}
+
+.playback-options .segment {
+  padding: 2px 8px;
+  font-family: var(--mono);
+  font-size: 11.5px;
 }
 
 .follow-live {
@@ -1145,15 +1343,18 @@ button.session-row:hover:not(:disabled) {
   height: 22px;
 }
 
+/* The whole known span; the part not loaded yet stays dotted. */
 .scrub-track {
   position: absolute;
-  top: 8px;
+  top: 7px;
   left: 0;
   right: 0;
-  height: 6px;
+  height: 8px;
   overflow: hidden;
-  border-radius: 3px;
-  background: var(--bg-raised);
+  border-radius: 4px;
+  background:
+    radial-gradient(circle, rgba(141, 155, 179, 0.3) 1px, transparent 1.5px) 0 50% / 6px 6px repeat-x,
+    #080c13;
   box-shadow: inset 0 0 0 1px var(--border-strong);
 }
 
@@ -1161,17 +1362,20 @@ button.session-row:hover:not(:disabled) {
 .scrub-loaded {
   position: absolute;
   inset: 0 auto 0 0;
-  background: repeating-linear-gradient(
-    135deg,
-    rgba(141, 155, 179, 0.32) 0 4px,
-    rgba(141, 155, 179, 0.18) 4px 8px
-  );
+  background: repeating-linear-gradient(135deg, #273246 0 4px, #1d2636 4px 8px);
+  transition: width var(--motion-base) var(--ease-out);
 }
 
 .scrub-played {
   position: absolute;
   inset: 0 auto 0 0;
-  background: var(--blue);
+  border-radius: 4px 0 0 4px;
+  background: linear-gradient(90deg, rgba(90, 167, 255, 0.45), var(--blue));
+  transition: width var(--motion-base) var(--ease-out);
+}
+
+.scrubber.is-pending .scrub-played {
+  background: linear-gradient(90deg, rgba(90, 167, 255, 0.25), rgba(90, 167, 255, 0.6));
 }
 
 .scrub-input {
@@ -1199,33 +1403,66 @@ button.session-row:hover:not(:disabled) {
   background: transparent;
 }
 
+/* The playback cursor: a bright thumb with a soft blue halo, easy to find on the track. */
 .scrub-input::-webkit-slider-thumb {
-  width: 14px;
-  height: 14px;
-  margin-top: 4px;
-  border: 2px solid var(--bg);
+  width: 16px;
+  height: 16px;
+  margin-top: 3px;
+  border: 3px solid var(--blue);
   border-radius: 50%;
-  background: var(--text);
+  background: #f4f8ff;
+  box-shadow: 0 0 0 3px rgba(90, 167, 255, 0.22);
   appearance: none;
 }
 
 .scrub-input::-moz-range-thumb {
-  width: 12px;
-  height: 12px;
-  border: 2px solid var(--bg);
+  width: 10px;
+  height: 10px;
+  border: 3px solid var(--blue);
   border-radius: 50%;
-  background: var(--text);
+  background: #f4f8ff;
+  box-shadow: 0 0 0 3px rgba(90, 167, 255, 0.22);
+}
+
+.scrubber.is-idle .scrub-input::-webkit-slider-thumb {
+  border-color: var(--slate);
+  box-shadow: none;
+}
+
+.scrubber.is-idle .scrub-input::-moz-range-thumb {
+  border-color: var(--slate);
+  box-shadow: none;
+}
+
+.scrub-input:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 3px;
+  border-radius: 4px;
 }
 
 .scrub-markers {
   position: relative;
-  height: 14px;
-  margin: 0 7px;
+  height: 16px;
+  margin: 0 8px;
+}
+
+.scrub-markers::before {
+  content: "";
+  position: absolute;
+  top: 50%;
+  left: 0;
+  right: 0;
+  height: 1px;
+  background: rgba(38, 51, 74, 0.7);
+}
+
+.scrub-markers.is-empty::before {
+  display: none;
 }
 
 .scrub-marker {
   position: absolute;
-  top: 1px;
+  top: 2px;
   width: 8px;
   height: 12px;
   padding: 0;
@@ -1234,99 +1471,298 @@ button.session-row:hover:not(:disabled) {
   background: var(--tone);
   transform: translateX(-50%);
   cursor: pointer;
+  transition:
+    transform var(--motion-fast) var(--ease-out),
+    box-shadow var(--motion-fast) ease;
+}
+
+.scrub-marker:hover {
+  transform: translateX(-50%) scale(1.25);
 }
 
 .scrub-marker.mk-check-failed {
-  width: 3px;
-  opacity: 0.75;
+  width: 2px;
+  height: 10px;
+  top: 3px;
+  opacity: 0.7;
 }
 
 .scrub-marker.mk-first-failure {
   width: 4px;
-  height: 14px;
+  height: 16px;
   top: 0;
-  box-shadow: 0 0 0 2px var(--panel), 0 0 0 3px var(--red);
+  box-shadow:
+    0 0 0 2px #0b111a,
+    0 0 0 3px var(--red);
 }
 
 .scrub-marker.mk-recovered {
   width: 10px;
   height: 10px;
-  top: 2px;
+  top: 3px;
   border-radius: 50%;
+  box-shadow: 0 0 0 2px #0b111a;
 }
 
 .scrub-marker.mk-unresolved {
   width: 10px;
   height: 10px;
-  top: 2px;
+  top: 3px;
   border: 2px solid var(--red);
-  background: var(--panel);
+  border-radius: 50%;
+  background: #0b111a;
+}
+
+/* The marker of the event being replayed. */
+.scrub-marker.is-current {
+  transform: translateX(-50%) scale(1.35);
+  opacity: 1;
+}
+
+.scrub-marker.mk-first-failure.is-current {
+  box-shadow:
+    0 0 0 2px #0b111a,
+    0 0 0 3px var(--red),
+    0 0 10px 2px rgba(255, 93, 108, 0.35);
+}
+
+.scrub-marker.mk-recovered.is-current {
+  box-shadow:
+    0 0 0 2px #0b111a,
+    0 0 0 3px rgba(60, 207, 142, 0.6);
 }
 
 .scrub-marker:focus-visible {
-  outline-offset: 2px;
+  outline-offset: 3px;
 }
 
 .scrub-scale {
   display: flex;
+  align-items: center;
   justify-content: space-between;
   gap: 10px;
   color: var(--text-3);
   font-size: 11px;
 }
 
+.scrub-legend {
+  display: inline-flex;
+  flex-wrap: wrap;
+  gap: 4px 12px;
+  margin: 0 auto;
+  font-family: var(--sans);
+  font-size: 10.5px;
+  letter-spacing: 0.02em;
+}
+
+.legend-item {
+  display: inline-flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.legend-item::before {
+  content: "";
+  flex: none;
+  width: 10px;
+  height: 6px;
+  border-radius: 2px;
+}
+
+.lg-played::before {
+  background: var(--blue);
+}
+
+.lg-loaded::before {
+  background: repeating-linear-gradient(135deg, #3a475e 0 2px, #1d2636 2px 4px);
+}
+
+.lg-known::before {
+  background: radial-gradient(circle, rgba(141, 155, 179, 0.5) 1px, transparent 1.5px) 0 50% / 4px 4px
+    repeat-x;
+  box-shadow: inset 0 0 0 1px var(--border-strong);
+}
+
+.lg-failure::before {
+  width: 3px;
+  height: 10px;
+  background: var(--red);
+}
+
+.lg-recovered::before {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  background: var(--green);
+}
+
+.lg-unresolved::before {
+  width: 6px;
+  height: 6px;
+  border: 2px solid var(--red);
+  border-radius: 50%;
+}
+
 .playback-alert {
   margin: 0;
 }
 
+/* Keyboard shortcuts: a quiet hint, not a call to action. */
 .playback-keys {
+  display: inline-flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 14px;
+  margin-left: auto;
+  color: var(--text-3);
+  font-size: 11px;
+  white-space: nowrap;
+}
+
+.key-hint {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+}
+
+.key-hint kbd + kbd {
+  margin-left: -1px;
+}
+
+.playback-keys kbd {
+  min-width: 18px;
+  padding: 0 4px;
+  border: 1px solid var(--border-strong);
+  border-bottom-width: 2px;
+  border-radius: 3px;
+  background: #0b111a;
+  color: var(--text-2);
+  font-family: var(--mono);
+  font-size: 9.5px;
+  line-height: 14px;
+  text-align: center;
+  text-transform: uppercase;
+}
+
+/* ---- current-event hero ------------------------------------------------------------ */
+
+/*
+ * Colour follows the evidence: neutral blue for an ordinary event, green for a passing
+ * check or an observed recovery, red for a failure or an unresolved failure, amber for an
+ * observed error. Only the first observable failure gets the strongest emphasis.
+ */
+.now-card {
+  --hero-tint: var(--accent-soft);
+  display: grid;
+  grid-template-columns: 116px minmax(0, 1fr);
+  align-items: center;
+  min-width: 0;
+  min-height: 94px;
+  border: 1px solid color-mix(in srgb, var(--tone, var(--blue)) 24%, var(--border));
+  border-left: 3px solid var(--tone, var(--blue));
+  border-radius: var(--radius-sm);
+  background:
+    linear-gradient(
+      90deg,
+      color-mix(in srgb, var(--tone, var(--blue)) var(--hero-tint), transparent),
+      transparent 65%
+    ),
+    #090e15;
+  transition:
+    border-color var(--motion-base) ease,
+    background-color var(--motion-base) ease;
+}
+
+.now-card.moment-event {
+  --hero-tint: 6%;
+  border-color: var(--border);
+  border-left-color: rgba(90, 167, 255, 0.7);
+}
+
+.now-card.moment-failed,
+.now-card.moment-passed,
+.now-card.moment-warning,
+.now-card.moment-recovered,
+.now-card.moment-unresolved {
+  --hero-tint: 11%;
+}
+
+.now-card.moment-first-failure {
+  --hero-tint: var(--accent-strong);
+  border-color: color-mix(in srgb, var(--red) 45%, var(--border));
+  box-shadow: inset 0 0 0 1px rgba(255, 93, 108, 0.12);
+}
+
+.now-card.moment-recovered {
+  border-color: color-mix(in srgb, var(--green) 38%, var(--border));
+}
+
+.now-card.is-idle {
+  border-color: var(--border);
+  border-left-color: var(--border-strong);
+  background: #090e15;
+  font-size: 12.5px;
+}
+
+.hero-index {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  align-self: stretch;
+  gap: 2px;
+  padding: 10px 14px;
+  border-right: 1px solid rgba(38, 51, 74, 0.6);
+}
+
+.hero-index .eyebrow {
+  margin: 0;
+  font-size: 9.5px;
+  letter-spacing: 0.14em;
+}
+
+.hero-seq {
+  color: var(--text);
+  font-size: 24px;
+  font-weight: 650;
+  line-height: 1.1;
+  letter-spacing: -0.02em;
+}
+
+.now-card.is-idle .hero-seq {
+  color: var(--text-3);
+}
+
+.hero-of {
   color: var(--text-3);
   font-size: 11px;
 }
 
-.playback-keys kbd {
-  padding: 0 4px;
-  border: 1px solid var(--border-strong);
-  border-radius: 3px;
-  background: var(--bg-raised);
-  color: var(--text-2);
-  font-family: var(--mono);
-  font-size: 10.5px;
-}
-
-.now-card {
+.hero-body {
   display: flex;
   flex-direction: column;
-  gap: 6px;
+  gap: 5px;
   min-width: 0;
-  padding: 10px 12px;
-  border: 1px solid var(--border);
-  border-left: 3px solid var(--tone, var(--blue));
-  border-radius: var(--radius-sm);
-  background: var(--bg-raised);
+  padding: 10px 16px;
 }
 
-.now-card.is-idle {
-  border-left-color: var(--border-strong);
-  font-size: 12.5px;
+.hero-body.is-entering {
+  animation: hero-enter var(--motion-base) var(--ease-out);
+}
+
+@keyframes hero-enter {
+  from {
+    opacity: 0.35;
+    transform: translateY(3px);
+  }
 }
 
 .now-head {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px 10px;
+  gap: 6px 10px;
   min-width: 0;
-}
-
-.now-head .eyebrow {
-  margin: 0;
-}
-
-.now-seq {
-  color: var(--text);
-  font-size: 15px;
-  font-weight: 650;
 }
 
 .now-time,
@@ -1340,22 +1776,45 @@ button.session-row:hover:not(:disabled) {
 }
 
 .now-summary {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: var(--text);
-  font-size: 14px;
-  overflow-wrap: anywhere;
+  font-size: 15px;
+  font-weight: 500;
 }
 
 .now-meta {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 8px;
+  gap: 6px 8px;
+  min-height: 18px;
+  min-width: 0;
 }
 
 .now-path {
+  min-width: 0;
+  max-width: 100%;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
   color: #9fb2cc;
   font-size: 12px;
-  overflow-wrap: anywhere;
+}
+
+/* The forensic moment labels read first in the hero. */
+.hero-marker.mk-first-failure,
+.hero-marker.mk-unresolved,
+.hero-marker.mk-recovered {
+  padding: 1px 8px;
+  font-size: 11px;
+}
+
+.hero-marker.mk-first-failure {
+  border-color: var(--red);
+  background: rgba(255, 93, 108, 0.18);
 }
 
 /* ---- timeline ---------------------------------------------------------------------- */
@@ -1428,11 +1887,27 @@ button.session-row:hover:not(:disabled) {
   background: var(--tone);
 }
 
+/* Filters and search: subordinate to the replay theater above. */
 .timeline-toolbar {
   display: flex;
   align-items: center;
   flex-wrap: wrap;
-  gap: 10px 14px;
+  gap: 8px 12px;
+}
+
+.timeline-toolbar .segmented {
+  border-color: rgba(26, 35, 49, 0.9);
+  background: rgba(10, 15, 23, 0.6);
+}
+
+.timeline-toolbar .segment {
+  padding: 3px 9px;
+  font-size: 12px;
+}
+
+.timeline-toolbar .search {
+  padding: 5px 10px;
+  font-size: 12.5px;
 }
 
 .segmented {
@@ -1481,6 +1956,11 @@ button.session-row:hover:not(:disabled) {
   color: var(--text-3);
 }
 
+.search:focus-visible {
+  border-color: rgba(90, 167, 255, 0.6);
+  outline-offset: 1px;
+}
+
 .timeline-count {
   margin-left: auto;
   color: var(--text-2);
@@ -1523,24 +2003,23 @@ button.session-row:hover:not(:disabled) {
   list-style: none;
 }
 
-/* The rail: one continuous line behind every node. */
-.timeline-list::before {
-  content: "";
-  position: absolute;
-  top: 0;
-  bottom: 0;
-  left: 87px;
-  width: 1px;
-  background: linear-gradient(var(--border-strong), var(--border-strong));
-}
-
 .tl-item {
   position: absolute;
   left: 0;
   right: 0;
 }
 
+/*
+ * Row states compose through variables: a left bar (forensic marker or playback cursor)
+ * and a neutral ring (the event whose detail panel is open).
+ *   CURRENT  = where the playback cursor is: solid left bar, tinted row, CURRENT tag.
+ *   SELECTED = the event shown in the detail panel: thin neutral ring, DETAIL tag.
+ */
 .tl-row {
+  --row-accent: var(--blue);
+  --bar: 0px;
+  --bar-color: transparent;
+  --ring: transparent;
   position: relative;
   display: grid;
   grid-template-columns: 72px 30px minmax(0, 1fr);
@@ -1551,10 +2030,16 @@ button.session-row:hover:not(:disabled) {
   border: 0;
   border-bottom: 1px solid rgba(26, 35, 49, 0.7);
   background: transparent;
+  box-shadow:
+    inset var(--bar) 0 0 var(--bar-color),
+    inset 0 0 0 1px var(--ring);
   color: inherit;
   font: inherit;
   text-align: left;
   cursor: pointer;
+  transition:
+    background-color var(--motion-fast) ease,
+    box-shadow var(--motion-fast) ease;
 }
 
 .tl-row:hover {
@@ -1565,38 +2050,44 @@ button.session-row:hover:not(:disabled) {
   outline-offset: -2px;
 }
 
-.tl-row.is-selected {
-  background: rgba(90, 167, 255, 0.09);
-  box-shadow: inset 2px 0 0 var(--blue);
-}
-
-.tl-row.has-first-failure {
-  background: linear-gradient(90deg, rgba(255, 93, 108, 0.12), rgba(255, 93, 108, 0.02) 60%);
-  box-shadow: inset 3px 0 0 var(--red);
+.tl-row.has-recovered {
+  --row-accent: var(--green);
+  --bar: 3px;
+  --bar-color: var(--green);
+  background: linear-gradient(90deg, rgba(60, 207, 142, 0.1), rgba(60, 207, 142, 0.01) 60%);
 }
 
 .tl-row.has-unresolved {
-  box-shadow: inset 3px 0 0 var(--red);
+  --row-accent: var(--red);
+  --bar: 3px;
+  --bar-color: var(--red);
+  background: linear-gradient(90deg, rgba(255, 93, 108, 0.07), transparent 50%);
 }
 
-.tl-row.has-recovered {
-  background: linear-gradient(90deg, rgba(60, 207, 142, 0.1), rgba(60, 207, 142, 0.01) 60%);
-  box-shadow: inset 3px 0 0 var(--green);
+.tl-row.has-first-failure {
+  --row-accent: var(--red);
+  --bar: 3px;
+  --bar-color: var(--red);
+  background: linear-gradient(90deg, rgba(255, 93, 108, 0.14), rgba(255, 93, 108, 0.02) 60%);
 }
 
-.tl-row.is-selected.has-first-failure,
-.tl-row.is-selected.has-recovered,
-.tl-row.is-selected.has-unresolved {
-  outline: 1px solid rgba(90, 167, 255, 0.5);
-  outline-offset: -1px;
+.tl-row.is-selected {
+  --ring: rgba(196, 208, 226, 0.42);
 }
 
-/* The playback cursor: a bright left bar plus a labelled sequence, never colour alone. */
+.tl-row.is-selected:not(.has-recovered, .has-unresolved, .has-first-failure, .is-current) {
+  background: rgba(141, 155, 179, 0.06);
+}
+
+/* The playback cursor: a bright left bar plus a CURRENT tag, never colour alone. */
 .tl-row.is-current {
-  background: rgba(90, 167, 255, 0.14);
-  box-shadow:
-    inset 4px 0 0 var(--blue),
-    inset 0 0 0 1px rgba(90, 167, 255, 0.35);
+  --bar: 4px;
+  --bar-color: var(--row-accent);
+  background: linear-gradient(
+    90deg,
+    color-mix(in srgb, var(--row-accent) 20%, transparent),
+    color-mix(in srgb, var(--row-accent) 6%, transparent) 70%
+  );
 }
 
 .tl-row.is-current .tl-seq {
@@ -1606,7 +2097,36 @@ button.session-row:hover:not(:disabled) {
 
 .tl-row.is-current .tl-seq::before {
   content: "▶ ";
-  color: var(--blue);
+  color: var(--row-accent);
+}
+
+.tl-tags {
+  display: inline-flex;
+  flex: none;
+  gap: 4px;
+  margin-left: auto;
+}
+
+.tl-tag {
+  padding: 0 5px;
+  border: 1px solid transparent;
+  border-radius: 3px;
+  font-family: var(--mono);
+  font-size: 9.5px;
+  font-weight: 650;
+  letter-spacing: 0.12em;
+  line-height: 15px;
+}
+
+.tag-current {
+  border-color: color-mix(in srgb, var(--row-accent) 60%, transparent);
+  background: color-mix(in srgb, var(--row-accent) 22%, transparent);
+  color: var(--text);
+}
+
+.tag-selected {
+  border-color: rgba(196, 208, 226, 0.4);
+  color: var(--text-2);
 }
 
 .tl-seq {
@@ -1622,13 +2142,43 @@ button.session-row:hover:not(:disabled) {
   color: var(--text-2);
 }
 
+/*
+ * The rail: each row draws its own segment so the line reads as one path from session
+ * start to stop; segments before the playback cursor are tinted as already replayed.
+ */
 .tl-rail {
+  position: relative;
   display: grid;
   place-items: center;
   height: 100%;
 }
 
+.tl-rail::before {
+  content: "";
+  position: absolute;
+  top: 0;
+  bottom: -1px;
+  left: 50%;
+  width: 2px;
+  transform: translateX(-50%);
+  background: var(--border-strong);
+}
+
+.tl-item[aria-posinset="1"] .tl-rail::before {
+  top: 50%;
+}
+
+.tl-row.is-played .tl-rail::before {
+  background: rgba(90, 167, 255, 0.42);
+}
+
+.tl-row.is-current .tl-rail::before {
+  background: linear-gradient(rgba(90, 167, 255, 0.42) 50%, var(--border-strong) 50%);
+}
+
 .tl-node {
+  position: relative;
+  z-index: 1;
   display: block;
   width: 9px;
   height: 9px;
@@ -1689,6 +2239,19 @@ button.session-row:hover:not(:disabled) {
   box-shadow:
     0 0 0 3px var(--bg-raised),
     0 0 0 5px rgba(60, 207, 142, 0.6);
+}
+
+.tl-row.is-current .tl-node:not(.glyph-triangle) {
+  outline: 2px solid color-mix(in srgb, var(--row-accent) 70%, transparent);
+  outline-offset: 4px;
+}
+
+.tl-row.is-current.has-first-failure .tl-node {
+  outline: none;
+  box-shadow:
+    0 0 0 3px var(--bg-raised),
+    0 0 0 5px var(--red),
+    0 0 12px 3px rgba(255, 93, 108, 0.3);
 }
 
 .tl-body {
@@ -1764,6 +2327,49 @@ button.session-row:hover:not(:disabled) {
   font-family: var(--mono);
   font-size: 9.5px;
   letter-spacing: 0.12em;
+}
+
+.timeline-skeleton {
+  overflow: hidden;
+}
+
+.tl-skeleton-row {
+  align-items: center;
+  height: 64px;
+  padding: 0 18px;
+}
+
+.skel-seq {
+  width: 40px;
+  flex: none;
+}
+
+.skel-node {
+  width: 9px;
+  height: 9px;
+  flex: none;
+  border-radius: 50%;
+  background: #1a2435;
+}
+
+.busy-dot {
+  display: inline-block;
+  width: 10px;
+  height: 10px;
+  flex: none;
+  margin-right: 6px;
+  border: 2px solid currentColor;
+  border-right-color: transparent;
+  border-radius: 50%;
+  vertical-align: -1px;
+  animation: spin 0.9s linear infinite;
+}
+
+.banner-busy {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 4px;
 }
 
 .timeline-footer {
@@ -2367,9 +2973,6 @@ button.session-row:hover:not(:disabled) {
   .tl-row {
     grid-template-columns: 52px 24px minmax(0, 1fr);
   }
-  .timeline-list::before {
-    left: 63px;
-  }
   .tl-kind,
   .tl-time {
     width: auto;
@@ -2382,6 +2985,121 @@ button.session-row:hover:not(:disabled) {
   }
 }
 
+/* ---- replay layout: sticky theater and breakpoints --------------------------------- */
+
+/*
+ * Sticky only where the theater and a useful slice of the timeline both fit: the timeline
+ * gets a height that keeps its rows below the theater at every scroll position, and the
+ * detail panel scrolls on its own instead of sliding under the theater.
+ */
+@media (min-width: 900px) and (min-height: 720px) {
+  .replay-theater {
+    position: sticky;
+    top: var(--topbar-height);
+  }
+  .replay .timeline-scroll {
+    height: var(--replay-timeline-height);
+  }
+}
+
+@media (min-width: 1101px) and (min-height: 720px) {
+  .replay .detail {
+    position: static;
+    max-height: var(--replay-timeline-height);
+  }
+}
+
+/* Detail panel below the timeline: short enough to stay clear of the theater. */
+@media (min-width: 900px) and (max-width: 1100px) and (min-height: 720px) {
+  .replay .detail {
+    max-height: max(240px, calc(100vh - 400px));
+  }
+}
+
+/* Compact but complete. */
+@media (max-width: 1279px) {
+  .theater-sub {
+    display: none;
+  }
+  .now-card {
+    grid-template-columns: 100px minmax(0, 1fr);
+  }
+  .hero-seq {
+    font-size: 21px;
+  }
+  .lg-played,
+  .lg-loaded,
+  .lg-known {
+    display: none;
+  }
+}
+
+/* Controls wrap; the theater scrolls with the page. */
+@media (max-width: 899px) {
+  .playback-options {
+    margin-left: 0;
+  }
+  .scrub-scale {
+    flex-wrap: wrap;
+  }
+  .scrub-legend {
+    order: 3;
+    flex-basis: 100%;
+    justify-content: center;
+  }
+  .playback-keys {
+    white-space: normal;
+  }
+}
+
+@media (max-width: 699px) {
+  .topbar {
+    flex-wrap: wrap;
+  }
+  .topbar-meta {
+    flex: 0 1 auto;
+    flex-wrap: wrap;
+    white-space: normal;
+  }
+  .theater-head {
+    flex-wrap: wrap;
+  }
+  .playback-keys {
+    display: none;
+  }
+  .control-group {
+    padding-left: 0;
+    border-left: 0;
+  }
+  .now-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .hero-index {
+    flex-direction: row;
+    align-items: baseline;
+    justify-content: flex-start;
+    gap: 8px;
+    padding: 8px 12px 0;
+    border-right: 0;
+  }
+  .hero-seq {
+    font-size: 18px;
+  }
+  .hero-body {
+    padding: 6px 12px 10px;
+  }
+  .now-head .evidence-badge {
+    margin-left: 0;
+  }
+  .tl-tags .tag-selected {
+    display: none;
+  }
+  .tl-path {
+    max-width: 60%;
+  }
+}
+
+/* Decorative motion off; every state stays visible without it. */
 @media (prefers-reduced-motion: reduce) {
   .timeline-scroll {
     scroll-behavior: auto;
@@ -2389,7 +3107,13 @@ button.session-row:hover:not(:disabled) {
   .scrub-played,
   .scrub-loaded,
   .tl-row,
-  .scrub-marker {
+  .scrub-marker,
+  .now-card,
+  .hero-body,
+  .play-button,
+  .theater-mark,
+  .status-dot,
+  .busy-dot {
     transition: none;
     animation: none;
   }

@@ -5,6 +5,7 @@ import {
   BASE_STEP_MS,
   DEFAULT_SPEED,
   MAX_SCRUBBER_MARKERS,
+  MOMENT_TONES,
   PLAYBACK_SPEEDS,
   adjacentImportant,
   buildImportant,
@@ -14,9 +15,40 @@ import {
   isTextEntry,
   lowerBound,
   markerPercent,
+  replayMoment,
   scrubberMarkers,
   stepInterval,
 } from "./playback";
+
+describe("replay moment", () => {
+  const kinds = (...k: ("first_failure" | "failed_run" | "recovered" | "unresolved")[]) =>
+    k.map((kind) => ({ kind }));
+
+  it("prefers report markers over the event type, first failure first", () => {
+    expect(replayMoment({ type: "check.failed" }, kinds("failed_run", "first_failure"))).toBe("first-failure");
+    expect(replayMoment({ type: "check.failed" }, kinds("unresolved", "failed_run"))).toBe("unresolved");
+    expect(replayMoment({ type: "check.passed" }, kinds("recovered"))).toBe("recovered");
+    expect(replayMoment({ type: "check.failed" }, kinds("failed_run"))).toBe("failed");
+  });
+
+  it("falls back to the recorded event type, never the summary", () => {
+    expect(replayMoment({ type: "check.failed" }, [])).toBe("failed");
+    expect(replayMoment({ type: "check.passed" }, [])).toBe("passed");
+    expect(replayMoment({ type: "error.observed" }, [])).toBe("warning");
+    expect(replayMoment({ type: "file.modified" }, [])).toBe("event");
+    expect(replayMoment({ type: "session.stopped" }, [])).toBe("event");
+  });
+
+  it("maps evidence meaning to tones: red failures, green recoveries, amber errors", () => {
+    expect(MOMENT_TONES["first-failure"]).toBe("danger");
+    expect(MOMENT_TONES.unresolved).toBe("danger");
+    expect(MOMENT_TONES.failed).toBe("danger");
+    expect(MOMENT_TONES.recovered).toBe("success");
+    expect(MOMENT_TONES.passed).toBe("success");
+    expect(MOMENT_TONES.warning).toBe("warning");
+    expect(MOMENT_TONES.event).toBe("info");
+  });
+});
 
 describe("playback timing", () => {
   it("offers exactly 0.5x, 1x, 2x and 4x, defaulting to 1x", () => {

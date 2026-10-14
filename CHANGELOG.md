@@ -9,8 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Replay UI playback controls (still under development; not the final cinematic
-  styling): a replay control bar above the timeline with Play / Pause (Replay at the
+- Replay UI visual styling (still under development; presentation only, no change to
+  playback logic, timing, pagination, the API or event schemas). The Timeline tab's
+  controls, status, scrubber, marker rail and current event now form one "replay
+  theater" that stays below the top bar while the timeline scrolls on windows of at
+  least 900 × 720 px (non-sticky with wrapping controls on smaller windows; the timeline
+  and detail panel are sized so nothing slides under it). The "Now replaying" card is a
+  larger hero whose colour follows the evidence: neutral blue for ordinary events, green
+  for passing checks and OBSERVED RECOVERY, red for failures and UNRESOLVED IN THIS
+  RECORDING, the strongest (still restrained) red for the FIRST OBSERVABLE FAILURE, amber
+  for observed errors; it is derived only from report markers and event types. Timeline
+  rows separate CURRENT (playback cursor) from DETAIL (event open in the detail panel),
+  and the rail is tinted up to the current event. The scrubber distinguishes the played,
+  loaded and known-but-unloaded spans, has a clearer thumb, a legend and an enlarged
+  marker for the current event. Clear primary / secondary / tertiary control hierarchy,
+  a compact speed group, a subtle keyboard-shortcut hint, a status dot that pulses only
+  while playing or loading (LIVE EDGE stays informational), quieter filters and search,
+  timeline-shaped loading skeletons and busy indicators. Short (140-200 ms) transitions,
+  all disabled under `prefers-reduced-motion`. The top bar now keeps a single line on
+  desktop widths. `replay --help` no longer lists the styling as missing. Still not
+  implemented: possible final micro-polish, share/export, GIF/video export, file
+  contents/diffs, agent-specific adapters and an optional AI analyst.
+- Replay UI playback controls (still under development; at this stage without the
+  replay visual styling above): a replay control bar above the timeline with Play / Pause (Replay at the
   end), previous / next event, previous / next important event, speed 0.5x / 1x / 2x / 4x
   (default 1x) and a scrubber over event sequence numbers that shows loaded vs. known
   events and markers for the first observable failure, check failures, observed
@@ -31,8 +52,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   failure evidence. Smooth scrolling only without `prefers-reduced-motion`. Engine in
   `web/src/hooks/usePlayback.ts`, pure logic in `web/src/lib/playback.ts`, controls in
   `web/src/views/PlaybackBar.tsx`. No backend, API or schema changes; `replay` help and
-  banner text updated to mention playback. Still not implemented: final cinematic visual
-  polish, share/export, GIF/video export, file contents/diffs, agent-specific adapters
+  banner text updated to mention playback. Still not implemented at that stage: replay
+  visual styling, share/export, GIF/video export, file contents/diffs, agent-specific adapters
   and an optional AI analyst.
 - Replay UI functional replay views (still under development): the session page now has
   Overview, Timeline, Findings, Files and Git / Final State tabs (URL stays
