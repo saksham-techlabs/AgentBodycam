@@ -8,8 +8,9 @@
 > the one-recorder-per-project active-recording lease (section 3.1, "Active recording
 > lease") and explicit wrapped-command recording (`agentbodycam run -- ...`, section 3.1,
 > "Wrapped commands") with deterministic check results (`check.passed` / `check.failed`,
-> section 3.1, "Check results"). Capture of commands not launched through
-> `agentbodycam run`, adapters, forensics, replay, UI, export and AI are not implemented.
+> section 3.1, "Check results"), and the deterministic local forensics engine
+> (`agentbodycam analyze`, section 3.4). Capture of commands not launched through
+> `agentbodycam run`, adapters, the replay API, UI, export and AI are not implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -744,17 +745,169 @@ documented log files, exported transcripts, hooks or official APIs.
 - If an agent exposes nothing, AgentBodycam still works in universal mode.
 - No adapter is implemented or claimed as supported today.
 
-### 3.4 Local Forensics Engine
+### 3.4 Local Forensics Engine (implemented)
 
-Deterministic, offline analysis over the event store. No AI required. Planned outputs:
+Code: `core/forensics.py` (analysis), `models/forensics.py` (typed report). CLI:
 
-- Ordered forensic timeline.
-- **First observable failure**: the earliest recorded failing test/build/command.
-- Changes recorded between the last observed success and the first observed failure
-  (presented as a fact about ordering, not as a cause).
-- Retry and recovery detection (failure followed by later success of the same check).
-- Final project state summary (files changed, diffstat, last known test/build result).
-- Every finding labelled `observed` or `inferred` with links to supporting events.
+```text
+agentbodycam analyze [--project DIR] [--json] <session-id>
+```
+
+Library API (what the future Replay API will call directly):
+
+```python
+analyze_session(store, session_id) -> ForensicReport      # reads session.json + events.jsonl
+analyze_events(session, events, recorder_live=...) -> ForensicReport   # pure function
+report.to_dict() / report.to_json()                       # deterministic JSON
+```
+
+**Core rule: temporal relationships are facts, causation is not.** Findings say "pytest
+failed at event #10 and later passed at event #18" or "2 file changes were observed
+between the failed and the later passing check". They never say a change caused or
+repaired anything, never name a root cause, suspect or actor, and never claim the project
+is still failing ("unresolved *in this recording*"). Task 8 produces **observed findings
+only** (`finding_evidence: "observed"` on every finding); inferred hypotheses are reserved
+for the optional AI analyst.
+
+**Read-only.** Analysis loads `session.json` and `events.jsonl` through `EventStore` and
+keeps every result in memory. It writes nothing (no derived events, no session changes, no
+cache files), runs no Git or other process, makes no network request and never reads the
+project's current files. The only other thing consulted is the read-only active-session
+discovery (section 3.1), and only for a session whose status is still `recording`, to tell
+a live recording from one whose recorder died.
+
+**Order.** `event.sequence` is the only order used. `monotonic_ns` is never compared
+across events and timestamps are display metadata only.
+
+**Timeline.** One item per event: `sequence`, `event_id`, `timestamp`, `type`,
+`category`, `source`, `summary`, `path`, `command_id` (command/check events) and
+`evidence`. Only already-recorded, already-redacted fields; raw payloads (hashes, argv,
+Git root paths) are not copied. Capped at 5000 items in the report (`total` keeps the real
+count; the CLI prints at most 40).
+
+**Observable failures.** Conservative:
+
+| Evidence | Failure type |
+|---|---|
+| `check.failed` | `check_failed` (strongest evidence) |
+| `command.finished` with `outcome: spawn_error` | `command_spawn_error` |
+| `command.finished` with `outcome: signaled` | `command_signaled` |
+| `command.finished` with `outcome: interrupted` | `command_interrupted` |
+
+A command that has a check event is never reported again as a command failure. A plain
+non-zero exit of an unclassified command is **not** a failure (`git diff --quiet` exits 1
+legitimately). The **first observable failure** is the qualifying event with the lowest
+sequence number; it carries its failure type, check kind/name/signature where applicable,
+the event's own summary and `evidence_event_ids` (command.started, command.finished and,
+for a check, the check event).
+
+**Same-check identity.** Two check runs are the same check only if their signature is
+equal:
+
+```text
+check_signature = sha256(canonical_json({
+    "version": 1, "kind": <check kind>, "name": <generated check name>,
+    "executable": <recorded program file name>,
+    "argv": <command.started's recorded, redacted argv>,
+    "working_directory": <recorded project-relative working directory>}))
+```
+
+Only evidence already stored is used; the original process argv is never involved. A run
+gets **no signature** (it is "ungrouped": it still counts as an observable failure and
+appears in final states, but takes part in no retry/recovery/unresolved finding, and an
+info note says so) when its paired `command.started` lacks these fields or its recorded
+argv is lossy: `argv_truncated`, `argv_redacted`, `argument_count` not matching, or an
+argument after the program rewritten to `<external-path>` (two different paths would look
+identical). The program itself (`argv[0]`) is accepted when it was rewritten to
+`<external-path>` because absolute interpreter paths always are; the recorded executable
+file name stands in for it. So `pytest tests/auth` and `pytest tests/billing`, or the same
+argv in two working directories, are different checks; missing a recovery is preferred
+over inventing one. When several signatures share a name, `display_name` adds the first 8
+hex characters (`pytest [2221cf76]`).
+
+**Relationship validation.** Per `command_id`: `command.started` -> `command.finished` ->
+optional check event. Indexes are built in the single pass. Contradictions produce a
+`warning` (code, message, event IDs) and **exclude that command from all findings**;
+nothing is repaired or guessed:
+
+| Code | Situation |
+|---|---|
+| `duplicate_command_started` / `duplicate_command_finished` / `duplicate_check` | the same `command_id` twice |
+| `command_finished_without_start`, `command_started_after_result` | finish without an earlier start |
+| `check_without_command_start`, `check_before_command_finished` | check with no start, or before its finish |
+| `check_contradicts_command_finished` | `check.passed`/`check.failed` disagrees with the finish's outcome/exit code |
+| `invalid_check_event`, `check_result_mismatch`, `check_without_command`, `invalid_command_event` | unusable payloads |
+
+A `command.started` without a finish is **not** corruption (crash, kill, recording ended):
+it is an **incomplete command** (`command_id`, start sequence, executable, summary,
+evidence) reported as "Command started but no finish event was recorded." (plus "may still
+be running" during a live recording); it is never called a crash. `analyze_events` itself
+raises `ForensicInputError` if handed events that are not one session's complete,
+contiguous, sequence-ordered log (the store already guarantees this for `analyze_session`).
+
+**Retries, recoveries, unresolved failures.** Runs are grouped by signature (in sequence
+order) and walked once, splitting history into failure periods:
+
+- consecutive failures form one period: the first is the initial failure, the rest are
+  retries (`failed_attempts`, `retry_count`); "pytest remained failing across 3 recorded
+  attempts";
+- a period followed by a pass of the same signature is a **recovery** (first/last failed
+  and recovered event IDs and sequences, attempts, previous pass if any, change windows,
+  `evidence_event_ids`), summarised as "pytest failed at event #10 and later passed at
+  event #18 after 2 additional recorded attempts.";
+- `PASS FAIL FAIL PASS FAIL PASS` gives two separate recoveries, never one merged result;
+- a period still open at the end of the evidence is an **unresolved failure**: "Latest
+  recorded pytest result: FAILED (unresolved in this recording)."
+
+**Change windows.** File events (`file.created|modified|deleted`) strictly between two
+sequence numbers, with counts per kind and at most 20 listed (`file_changes_truncated`):
+
+- `changes_before_failure`: after the last recorded pass of the *same signature* and
+  before the first failure of the period. If no such pass exists it is `null` and
+  `previous_pass_note` says "No earlier passing result for this exact check was recorded."
+  (no "regression window" is invented);
+- `changes_between_failure_and_pass` (first failure to recovery) and
+  `changes_after_last_failure` (last failure to recovery, or to the end of the evidence for
+  an unresolved failure).
+
+They are described as "file changes observed between ...", never as suspects.
+
+**Final evidence.** `final_check_states`: the last observed result per signature (plus each
+ungrouped run), with attempts and pass/fail counts. `file_change_summary`: created /
+modified / deleted event counts and per-path first/last observed change, "observed during
+this recording", not the current file system. `latest_git_state`: the last recorded
+`git.snapshot` (repository, branch, detached/unborn, abbreviated HEAD, clean/dirty and
+counts, upstream ahead/behind; the absolute repository root is not exposed), described as
+the last recorded Git state, never the current one. `errors_observed`: `error.observed`
+events, kept apart from project failures. `command_summary`: counts.
+
+**Session completeness.**
+
+| `recording_state` | When | `analysis_complete` |
+|---|---|---|
+| `stopped` | the log contains `session.stopped` (or the metadata says `stopped`) | true |
+| `recording` | status `recording` and the live recorder (OS lock) is writing this session | false (a snapshot of the evidence read so far) |
+| `ended_without_stop` | status `recording`, no live recorder for it, no `session.stopped` | true, with a note |
+| `unknown` | status `recording` and liveness could not be established | false |
+| `not_started` | status `created` | false |
+
+Nothing is marked stale or repaired; the recorder is never blocked.
+
+**Bounds.** Timeline 5000 items (CLI 40); 20 file changes per window; 60 evidence IDs per
+finding (earliest ones plus the last three, `evidence_event_ids_truncated`); 200 items
+per finding list, 200 paths, 10 event IDs per warning. Every capped list is
+`{"items": [...], "total": N, "truncated": bool}`.
+
+**Determinism.** No random IDs, no current time, no machine-dependent ordering and no
+current file-system state in the report; lists follow sequence order (paths: sorted).
+Identical session bytes give an identical report and identical JSON (sorted keys, ASCII),
+except for `recording_state`/`analysis_complete` of a session whose status is still
+`recording`.
+
+**Performance.** One pass over the events builds every index; check series are walked once;
+change windows use binary search over prefix counts per change kind (O(log n) plus the 20
+listed items). Overall O(n log n) worst case, O(n) in practice; 16 000 events analyse in
+well under a second.
 
 ### 3.5 Replay API
 
@@ -792,10 +945,11 @@ src/agentbodycam/
   __init__.py      version
   __main__.py      `python -m agentbodycam`
   cli.py           argparse CLI (help, version, doctor, session create/list/show/active,
-                   record, run)
+                   record, run, analyze)
   core/            application logic (doctor, filelock, store, active, ignore, scanner,
-                   git_observer, recorder, command, redact, checks; later: forensics)
-  models/          typed dataclasses shared across layers (environment, events, session)
+                   git_observer, recorder, command, redact, checks, forensics)
+  models/          typed dataclasses shared across layers (environment, events, session,
+                   forensics)
   utils/           small dependency-free helpers (today: Git detection and the bounded,
                    shell-free read-only Git command runner)
 ```

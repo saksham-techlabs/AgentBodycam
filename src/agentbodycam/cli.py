@@ -3,8 +3,9 @@
 Implemented: environment check, session-store commands (including the read-only
 ``session active``), the polling recorder (file changes and read-only Git state; one
 recorder per project), explicit wrapped-command capture (``run -- <command>``) and
-deterministic check results for wrapped commands (``run --check KIND -- <command>``).
-Forensics and replay are not implemented yet and are intentionally absent from the CLI.
+deterministic check results for wrapped commands (``run --check KIND -- <command>``) and
+read-only deterministic forensic analysis of a recorded session (``analyze``). Replay is
+not implemented yet and is intentionally absent from the CLI.
 """
 
 from __future__ import annotations
@@ -28,6 +29,7 @@ from agentbodycam.core.active import (
 from agentbodycam.core.checks import CheckKind
 from agentbodycam.core.command import run_wrapped_command
 from agentbodycam.core.doctor import collect_environment, format_report
+from agentbodycam.core.forensics import analyze_session
 from agentbodycam.core.recorder import (
     DEFAULT_INTERVAL_SECONDS,
     GitStatus,
@@ -37,12 +39,20 @@ from agentbodycam.core.recorder import (
 )
 from agentbodycam.core.store import EventStore, StoreError
 from agentbodycam.models.events import Event, EventSource, EventType, EventValidationError
+from agentbodycam.models.forensics import (
+    ChangeWindow,
+    FailureType,
+    ForensicReport,
+    GitStateSummary,
+    RecordingState,
+)
 from agentbodycam.models.session import InvalidSessionIdError, Session
 
 PROG = "agentbodycam"
 TAGLINE = "Your AI coding agent now has a bodycam."
 MIN_INTERVAL_SECONDS = 0.05
 MAX_INTERVAL_SECONDS = 3600.0
+MAX_CLI_TIMELINE_ITEMS = 40
 
 _EVENT_LABELS = {
     EventType.FILE_CREATED: "CREATED",
@@ -79,8 +89,9 @@ def build_parser() -> argparse.ArgumentParser:
         description=(
             f"{TAGLINE}\n\nEarly development: file-system and read-only Git state recording, "
             "plus commands explicitly launched with `agentbodycam run -- ...` and their "
-            "test/build/lint/typecheck results. Other terminal commands and agent internals "
-            "are not captured."
+            "test/build/lint/typecheck results, and a deterministic, read-only forensic "
+            "report of a recorded session (`agentbodycam analyze`). Other terminal commands "
+            "and agent internals are not captured."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -207,6 +218,29 @@ def build_parser() -> argparse.ArgumentParser:
             "Overrides automatic classification."
         ),
     )
+
+    analyze = subparsers.add_parser(
+        "analyze",
+        parents=[project],
+        help="Deterministic forensic report for a recorded session (read-only, no AI).",
+        description=(
+            "Reconstruct what a recorded session shows: the ordered timeline, the first "
+            "observable failure, repeated failures and later passes of the same check, "
+            "failures still unresolved at the end of the recording, file changes observed "
+            "around them, incomplete commands and the last recorded Git state.\n\n"
+            "Findings describe order, never causes: 'pytest failed, then later passed' is "
+            "reported; why it passed is not. Reads only stored evidence: writes nothing, "
+            "runs no Git command and makes no network request. A session that is still "
+            "being recorded is analysed as a snapshot of the evidence so far."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    analyze.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the report as deterministic JSON (the same report, machine-readable).",
+    )
+    analyze.add_argument("session_id", metavar="<session-id>")
     return parser
 
 
@@ -423,6 +457,173 @@ def _run_record(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
     return 0
 
 
+def _window_lines(window: ChangeWindow | None, indent: str) -> list[str]:
+    if window is None:
+        return []
+    lines = [f"{indent}{_display(window.description)}"]
+    for change in window.file_changes:
+        path = _display(change.path) if change.path is not None else "(path not recorded)"
+        lines.append(f"{indent}  #{change.sequence:<5} {change.change:<9} {path}")
+    if window.file_changes_truncated:
+        hidden = window.file_change_count - len(window.file_changes)
+        lines.append(f"{indent}  ... {hidden} more (see --json)")
+    return lines
+
+
+def _more(total: int, shown: int, indent: str = "  ") -> list[str]:
+    return [f"{indent}... {total - shown} more (see --json)"] if total > shown else []
+
+
+def _git_line(git: GitStateSummary) -> str:
+    if not git.repository:
+        return f"not a Git repository ({git.unavailable_reason or 'unavailable'})"
+    if git.detached:
+        where = f"detached HEAD at {git.head or '(none)'}"
+    elif git.head is None:
+        where = f"branch {git.branch or '(unknown)'} (no commits yet)"
+    else:
+        where = f"branch {git.branch or '(unknown)'} at {git.head}"
+    text = f"{where}, {git.state or 'unknown'}"
+    if git.state == "dirty":
+        text += (
+            f" ({git.staged} staged, {git.unstaged} unstaged, {git.untracked} untracked"
+            + (f", {git.conflicted} conflicted" if git.conflicted else "")
+            + ")"
+        )
+    return f"{_display(text)} (event #{git.sequence})"
+
+
+_STATE_TEXT = {
+    RecordingState.STOPPED: "stopped",
+    RecordingState.RECORDING: "recording in progress (snapshot of the evidence so far)",
+    RecordingState.ENDED_WITHOUT_STOP: "ended without a clean stop",
+    RecordingState.UNKNOWN: "recording state unknown",
+    RecordingState.NOT_STARTED: "never started recording",
+}
+
+
+def render_report(report: ForensicReport, *, max_timeline: int = MAX_CLI_TIMELINE_ITEMS) -> str:
+    """Concise human-readable rendering of a :class:`ForensicReport` (no analysis here)."""
+    completeness = "complete" if report.analysis_complete else "incomplete"
+    lines = [
+        "AgentBodycam forensic report",
+        f"Session: {report.session_id}",
+        f"Recording: {_STATE_TEXT[report.recording_state]} (analysis {completeness})",
+        f"Started: {report.started_at}   Ended: {report.ended_at or '-'}",
+        f"Events: {report.event_count}",
+        "Findings are observed order only; AgentBodycam does not infer why anything happened.",
+        "",
+    ]
+    first = report.first_observable_failure
+    if first is None:
+        lines.append("No observable check failure was recorded.")
+    else:
+        lines += ["First observable failure", f"  #{first.sequence:<5} {_display(first.summary)}"]
+    lines.append("")
+
+    if report.recoveries.total:
+        lines.append("Observed recoveries (later pass of the same check)")
+        for recovery in report.recoveries.items:
+            lines.append(f"  {_display(recovery.summary)}")
+            lines.append(f"    Failed attempts: {recovery.failed_attempts}")
+            if recovery.changes_before_failure is None:
+                lines.append(f"    {recovery.previous_pass_note}")
+            else:
+                lines += _window_lines(recovery.changes_before_failure, "    ")
+            lines += _window_lines(recovery.changes_between_failure_and_pass, "    ")
+        lines += _more(report.recoveries.total, len(report.recoveries.items))
+        lines.append("")
+
+    if report.unresolved_failures.total:
+        lines.append("Unresolved in this recording")
+        for failure in report.unresolved_failures.items:
+            lines.append(f"  {_display(failure.summary)}")
+            if failure.changes_before_failure is None:
+                lines.append(f"    {failure.previous_pass_note}")
+            else:
+                lines += _window_lines(failure.changes_before_failure, "    ")
+            lines += _window_lines(failure.changes_after_last_failure, "    ")
+        lines += _more(report.unresolved_failures.total, len(report.unresolved_failures.items))
+        lines.append("")
+
+    operational = [
+        f
+        for f in report.observable_failures.items
+        if f.failure_type is not FailureType.CHECK_FAILED
+    ]
+    if operational:
+        lines.append("Commands that did not complete normally")
+        lines += [f"  #{f.sequence:<5} {_display(f.summary)}" for f in operational]
+        lines.append("")
+
+    if report.incomplete_commands.total:
+        lines.append("Incomplete commands")
+        for command in report.incomplete_commands.items:
+            lines.append(f"  #{command.started_sequence:<5} {_display(command.command_summary)}")
+            lines.append(f"         {command.summary}")
+        lines += _more(report.incomplete_commands.total, len(report.incomplete_commands.items))
+        lines.append("")
+
+    if report.errors_observed.total:
+        lines.append("Errors observed (AgentBodycam, file system or Git; not project failures)")
+        lines += [f"  #{e.sequence:<5} {_display(e.summary)}" for e in report.errors_observed.items]
+        lines += _more(report.errors_observed.total, len(report.errors_observed.items))
+        lines.append("")
+
+    files = report.file_change_summary
+    lines += [
+        "Final evidence (observed during this recording)",
+        f"  Files: {files.modified_events} modified, {files.created_events} created, "
+        f"{files.deleted_events} deleted ({files.unique_paths} "
+        f"{'path' if files.unique_paths == 1 else 'paths'})",
+    ]
+    git = report.latest_git_state
+    lines.append(f"  Last recorded Git state: {_git_line(git) if git else 'none recorded'}")
+    states = report.final_check_states
+    if states.total:
+        lines.append("  Checks (latest recorded result):")
+        for state in states.items:
+            verdict = "PASS" if state.latest_result == "passed" else "FAIL"
+            name = _display(state.display_name)
+            lines.append(f"    {name:<40} {verdict}  (event #{state.latest_sequence})")
+        lines += _more(states.total, len(states.items), "    ")
+    else:
+        lines.append("  Checks: no check results were recorded")
+    lines.append("")
+
+    if report.warnings.total:
+        lines.append("Evidence notes")
+        for warning in report.warnings.items:
+            lines.append(f"  [{warning.severity.value}] {_display(warning.message)}")
+        lines += _more(report.warnings.total, len(report.warnings.items))
+        lines.append("")
+
+    shown = report.timeline.items[:max_timeline]
+    lines.append(f"Timeline ({len(shown)} of {report.timeline.total} events)")
+    for item in shown:
+        lines.append(
+            f"  #{item.sequence:<5} {item.timestamp[11:19]}  {item.type:<17} "
+            f"{_display(item.summary)}"
+        )
+    lines += _more(report.timeline.total, len(shown))
+    return "\n".join(lines) + "\n"
+
+
+def _run_analyze(args: argparse.Namespace, out: TextIO, err: TextIO) -> int:
+    project: Path = args.project if args.project is not None else Path.cwd()
+    try:
+        store = EventStore(project)
+        report = analyze_session(store, args.session_id)
+    except InvalidSessionIdError as exc:
+        err.write(f"error: {exc}\n")
+        return 2
+    except (StoreError, EventValidationError, OSError) as exc:
+        err.write(f"error: {exc}\n")
+        return 1
+    _write(out, report.to_json() + "\n" if args.json else render_report(report))
+    return 0
+
+
 def main(
     argv: Sequence[str] | None = None,
     *,
@@ -456,6 +657,8 @@ def main(
         return _run_session(args, stream, err_stream)
     if args.command == "record":
         return _run_record(args, stream, err_stream)
+    if args.command == "analyze":
+        return _run_analyze(args, stream, err_stream)
 
     parser.print_help(stream)
     return 0

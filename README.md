@@ -7,14 +7,24 @@
 > AgentBodycam can record file-system changes and read-only Git state changes in a project
 > (`agentbodycam record`), plus commands you explicitly launch through
 > `agentbodycam run -- <command>` and whether those that are tests, builds, lints or type
-> checks passed or failed. It does not observe arbitrary terminal commands, does not
-> integrate with any specific agent, and does not analyse sessions, replay them, export
-> them or provide a UI. It has no AI features. Expect breaking changes.
+> checks passed or failed, and it can produce a deterministic local forensic report of a
+> recorded session (`agentbodycam analyze`). It does not observe arbitrary terminal
+> commands, does not integrate with any specific agent, and does not replay sessions,
+> export them or provide a UI. It has no AI features. Expect breaking changes.
 >
-> Implemented: file recording, read-only Git recording, wrapped command recording,
-> deterministic check outcome recording.
-> Still not implemented: forensic analysis, replay API, UI, export, agent adapters, AI
-> analysis.
+> Implemented:
+> - file recording
+> - read-only Git state
+> - wrapped commands
+> - deterministic check outcomes
+> - local deterministic forensic analysis
+>
+> Still not implemented:
+> - Replay API
+> - React replay UI
+> - export/share cards/video
+> - agent-specific adapters
+> - optional AI analyst
 
 ## What is this?
 
@@ -51,7 +61,8 @@ It is designed to be:
 | Wrapped command recording (`run -- <command>`) | Implemented (explicitly wrapped commands only) |
 | Check outcome recording (`run --check KIND`, `check.passed` / `check.failed`) | Implemented (explicit, plus conservative automatic recognition) |
 | Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
-| Local forensics engine | Not started |
+| Local forensics engine (`analyze`) | Implemented (deterministic, read-only, observed findings only) |
+| Replay API | Not started |
 | Replay UI | Not started |
 | Share/export | Not started |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
@@ -151,7 +162,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: agent integrations, forensics, replay/UI, export or AI.
+- Not yet: agent integrations, replay/UI, export or AI.
 
 ### Recording commands you run
 
@@ -257,11 +268,81 @@ check.passed       Test passed: pytest
 - Output is **not analysed** (and not stored): no test names, assertion messages or
   compiler errors. The result comes from the exit status only.
 - **No cause is inferred.** A `file.modified` between a failing and a passing check is just
-  two observations in order; AgentBodycam never claims the edit fixed anything. Each run is
-  an independent check with its own `check_id`; failure-then-success patterns are left to
-  the future forensics engine.
+  two observations in order; AgentBodycam never claims the edit made the check pass. Each
+  run is an independent check with its own `check_id`; failure-then-pass patterns are
+  reported by `agentbodycam analyze` (below), again as order only.
 - Check names are generated from the recognised tool (`pytest`, `npm build`, `ruff`), never
   from your arguments, so secrets in arguments never appear in them.
+
+### Forensic analysis of a recording
+
+```bash
+agentbodycam analyze <session-id>                 # human-readable report
+agentbodycam analyze --project PATH <session-id>  # another project directory
+agentbodycam analyze --json <session-id>          # the same report as deterministic JSON
+```
+
+```text
+$ agentbodycam analyze 20261014T001023Z-dfa709c5a0effd8e
+AgentBodycam forensic report
+Session: 20261014T001023Z-dfa709c5a0effd8e
+Recording: stopped (analysis complete)
+Started: 2026-10-14T00:10:23.639517Z   Ended: 2026-10-14T00:10:40.379116Z
+Events: 19
+Findings are observed order only; AgentBodycam does not infer why anything happened.
+
+First observable failure
+  #10    Test failed: pytest (exit 1)
+
+Observed recoveries (later pass of the same check)
+  pytest failed at event #10 and later passed at event #18 after 2 additional recorded attempts.
+    Failed attempts: 2
+    File changes observed after the last recorded passing check (#5) and before the first recorded failing check (#10): 1.
+      #6     modified  app.py
+    File changes observed between the failed check (#10) and the later passing check (#18): 2.
+      #11    modified  app.py
+      #15    modified  app.py
+
+Final evidence (observed during this recording)
+  Files: 3 modified, 0 created, 0 deleted (1 path)
+  Last recorded Git state: branch main at 1651314, dirty (0 staged, 1 unstaged, 0 untracked) (event #7)
+  Checks (latest recorded result):
+    pytest                                   PASS  (event #18)
+
+Timeline (19 of 19 events)
+  #1     00:10:23  session.started   Recording started
+  ...
+```
+
+**Forensics identifies ordering and patterns, not causation.** It may say "pytest failed,
+then later passed after two more attempts" and "`app.py` was modified between the failed
+check and the later passing check". It never says the agent fixed pytest, that a change
+caused a failure, or what the root cause was. It reports:
+
+- an ordered timeline (by event sequence number; timestamps are display only);
+- the **first observable failure**: the earliest `check.failed`, or a wrapped command that
+  could not start, was ended by a signal or was interrupted. A plain non-zero exit of an
+  unclassified command (`git diff --quiet`) is *not* treated as a failure;
+- repeated failures and **observed recoveries** (a later pass) of the *same* check, where
+  "same" means the same kind, name, recorded (redacted) command line and working
+  directory. `pytest tests/auth` and `pytest tests/billing` are different checks. Runs
+  whose recorded command line is redacted, truncated or contains rewritten external paths
+  are never grouped (a missed recovery is preferred over an invented one);
+- failures **unresolved in this recording** (the latest recorded result failed; the
+  project may have changed after the recording stopped);
+- file changes observed between the last pass and the first failure, and between a
+  failure and the later pass (never called suspects);
+- commands that started but have no recorded finish, `error.observed` events (kept apart
+  from project failures), the files observed changing, and the **last recorded** Git state
+  (Git is not run again);
+- evidence-quality notes, e.g. contradictory command/check records, which are excluded
+  from findings rather than repaired.
+
+Every finding is labelled `observed` and lists the event IDs it is based on. Analysis reads
+the stored session only: it writes nothing, runs no Git command, uses no AI and makes no
+network request. A session that is still being recorded can be analysed; the report is
+then marked `analysis_complete: false`. A session whose recorder crashed is reported as
+`ended_without_stop`.
 
 ### Session store
 

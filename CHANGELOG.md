@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Local deterministic forensics engine (`core/forensics.py`, typed report in
+  `models/forensics.py`) and `agentbodycam analyze [--project DIR] [--json] <session-id>`.
+  Read-only over stored evidence (writes nothing, runs no Git, no AI, no network).
+  Reconstructs the sequence-ordered timeline, the first observable failure (`check.failed`,
+  or a wrapped command with outcome `spawn_error`/`signaled`/`interrupted` and no check;
+  a plain non-zero exit is not a failure), retries, observed recoveries and failures
+  unresolved in the recording for the *same* check (SHA-256 signature over the check kind
+  and name and the recorded executable, redacted argv and working directory; lossy argv is
+  never grouped), file changes observed between the last pass and the first failure and
+  between a failure and the later pass, incomplete commands, `error.observed` events, the
+  files observed changing and the last recorded Git state. Contradictory command/check
+  relationships are reported as warnings and excluded, never repaired. Live sessions are
+  analysed as a snapshot (`analysis_complete: false`); crashed ones are reported as
+  `ended_without_stop`. Every finding is `observed` and lists its evidence event IDs;
+  lists are bounded with explicit `total`/`truncated`. Identical session bytes give an
+  identical report. Findings state order only, never causes.
 - Deterministic check result recording: `agentbodycam run --check test|build|lint|typecheck
   -- <command>` (authoritative), plus conservative automatic recognition of a fixed
   whitelist (`pytest`, `python -m pytest|unittest|build|mypy|pyright|ruff check`,
