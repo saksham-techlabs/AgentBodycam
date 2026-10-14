@@ -9,6 +9,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Replay UI playback controls (still under development; not the final cinematic
+  styling): a replay control bar above the timeline with Play / Pause (Replay at the
+  end), previous / next event, previous / next important event, speed 0.5x / 1x / 2x / 4x
+  (default 1x) and a scrubber over event sequence numbers that shows loaded vs. known
+  events and markers for the first observable failure, check failures, observed
+  recoveries and unresolved failures (clickable; one tab stop with arrow-key navigation).
+  Playback is a deterministic visualization of the recorded evidence events at a fixed
+  800 ms per event at 1x (1600 / 400 / 200 ms at 0.5x / 2x / 4x), never real time and
+  never screen video. The current event is highlighted in the timeline, shown in a "Now
+  replaying" card with safe `TimelineItem` fields only and fills the detail panel.
+  Reaching the end of the loaded events loads the next page (one request at a time); a
+  failed or invalid page pauses playback and keeps the position. Seeking to an unloaded
+  event loads pages up to it (same 50-page cap and cancel as "Jump to event"). Jumps
+  (first failure, recovery marker, important events) pause playback. Live recordings
+  stop at the LIVE EDGE; an opt-in "Follow live" (off by default) advances to new events
+  only when paused at the edge. Playback pauses while the tab is hidden, on tab change
+  and on session change. Keyboard: Space, ←/→, Shift+←/→ (ignored while typing).
+  Smooth scrolling only without `prefers-reduced-motion`. Engine in
+  `web/src/hooks/usePlayback.ts`, pure logic in `web/src/lib/playback.ts`, controls in
+  `web/src/views/PlaybackBar.tsx`. No backend, API or schema changes; `replay` help and
+  banner text updated to mention playback.
 - Replay UI functional replay views (still under development): the session page now has
   Overview, Timeline, Findings, Files and Git / Final State tabs (URL stays
   `/session/<id>`). Paginated forensic timeline over

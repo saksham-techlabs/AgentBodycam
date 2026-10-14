@@ -13,9 +13,10 @@
 > (`agentbodycam replay-api`, section 3.5). The Replay UI is **under development**
 > (`agentbodycam replay`, section 3.6: app shell, connection status, session dashboard,
 > overview, paginated forensic timeline with first-failure / recovery / unresolved
-> markers, findings, observed files and last recorded Git / final state). Capture of
-> commands not launched through `agentbodycam run`, adapters, cinematic playback, file
-> contents and diffs, export and AI are not implemented.
+> markers, replay playback controls and scrubber, findings, observed files and last
+> recorded Git / final state). Capture of commands not launched through
+> `agentbodycam run`, adapters, the final cinematic replay styling, file contents and
+> diffs, export and AI are not implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -1096,8 +1097,51 @@ use only `GET /api/v1/sessions/<id>`, `/report` and `/timeline?after_sequence=N&
 No wording attributes a failure or recovery to a file change; the UI shows no raw event
 payloads, file contents, diffs, command output or absolute paths.
 
-**Not implemented yet.** Cinematic playback and scrubbing, file contents and diff viewer,
-export and sharing.
+**Implemented (10C.1): playback engine and scrubber.** Playback is a visualization of the
+recorded evidence events in sequence order, not a recording of the screen (none exists)
+and not real-time: timestamps are display metadata only.
+
+- *Engine* (`hooks/usePlayback.ts`). State: the current event and its index in the loaded
+  timeline, playing, speed, follow-live, loading-next-page, seeking and stalled flags,
+  plus derived total, loaded, start, end, live-edge and ended. One `setTimeout` per step
+  (rescheduled after each move, cleared on pause, unmount and session change, which
+  remounts the page). Interval model (`lib/playback.ts`): `800 ms / speed`, speeds 0.5x,
+  1x, 2x, 4x only. Playback runs over loaded events; at the end of them it calls
+  `useTimeline.loadMore()` (one request in flight, shared with paging and live polling)
+  and continues; an error or invalid page pauses with the cursor unchanged. Seeking to an
+  unloaded sequence or event reuses `useTimeline.loadUntil()` (500-event pages, 50-page
+  cap, cancellable). The engine reports every move through `onMove(item, cause)`; the
+  session page selects the event (unless the user closed the detail panel during
+  automatic playback), resets filters that would hide it and asks the timeline to reveal
+  it ("follow": scroll only when the row leaves the view, smooth unless reduced motion;
+  "jump": upper third, instant; keyboard focus moves only for explicit jumps).
+- *Controls* (`views/PlaybackBar.tsx`): Play / Pause / Replay, previous / next event,
+  previous / next important event, `#n / total`, a status chip (PLAYING, PAUSED, END OF
+  RECORDING, LIVE EDGE, LOADING NEXT PAGE, PAUSED · PAGE NOT LOADED), a speed group and,
+  for live recordings, a "Follow live" checkbox (off by default). The scrubber is a native
+  range input over sequence 1..total (the store guarantees contiguous sequences) with a
+  hatched "loaded" bar and an "n / total loaded" label; a drag into unloaded events seeks
+  once on release. A "Now replaying" card shows the current `TimelineItem`'s safe fields.
+- *Important events* (`lib/playback.ts`): only structured evidence: event types
+  `session.started`, `session.stopped`, `check.failed`, and the report's first
+  observable failure, `check_failed` observable failures, recovered events of
+  recoveries and last failed events of unresolved failures (these may lie beyond the
+  loaded pages). Scrubber markers (failures, recoveries, unresolved) are positioned by
+  sequence and bucketed to at most 200; they form one roving-tabindex toolbar.
+- *Live*: playback stops at the newest recorded event (LIVE EDGE). With "Follow live" on
+  and playback paused at the edge, new events from the 2.5 s poller move the cursor to
+  the newest one; playback never polls on its own.
+- *Keyboard*: Space, ←/→, Shift+←/→ on `document`, ignored in text-entry controls, with
+  Ctrl/Alt/Meta, when another handler already handled the key (tabs, marker rail) and,
+  for Space, on buttons, links and checkboxes, which keep their own activation.
+- *Accessibility and performance*: semantic buttons with labels, `aria-pressed` speeds, a
+  labelled range with `aria-valuetext`, a polite status region that changes on user
+  actions and state changes but not on every tick. Timeline rows are memoized, so a step
+  re-renders only the rows whose current/selected state changed; marker and important-
+  event lists are recomputed only when pages or the report change.
+
+**Not implemented yet.** The final cinematic visual polish (10C.2), file contents and diff
+viewer, export and sharing (cards, GIF, video).
 
 **API client** (`web/src/api/`). GET only, `cache: "no-store"`, `credentials:
 "same-origin"`, `redirect: "error"`, `referrerPolicy: "no-referrer"`, an `AbortSignal` per
@@ -1170,8 +1214,8 @@ Testing Library (`npm run test`) against a fake server that mirrors the real rou
 `tests/test_replay_ui.py` for serving, headers, path safety, bootstrap, the CLI and
 wheel packaging.
 
-Still to come: the "cinematic" replay and scrubbing, file/diff views, export, and clearly
-different styling of facts and inferences (section 2).
+Still to come: the final cinematic styling of the replay, file/diff views, export, and
+clearly different styling of facts and inferences (section 2).
 
 ### 3.7 Share / export pipeline
 

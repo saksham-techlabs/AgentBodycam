@@ -1,4 +1,5 @@
 import {
+  memo,
   useCallback,
   useEffect,
   useLayoutEffect,
@@ -45,7 +46,13 @@ export type JumpState =
 export interface FocusRequest {
   eventId: string;
   nonce: number;
+  /** "jump" brings the row to the upper third; "follow" scrolls only when it left the view. */
+  mode: "jump" | "follow";
+  /** Move keyboard focus to the row (explicit jumps only, never playback). */
+  focus: boolean;
 }
+
+type RevealMode = "nearest" | "jump" | "follow";
 
 interface TimelineViewProps {
   timeline: TimelineResource;
@@ -59,6 +66,9 @@ interface TimelineViewProps {
   onQuery: (query: string) => void;
   selectedId: string | null;
   onSelect: (eventId: string | null) => void;
+  /** The event playback is on, highlighted in the list. */
+  currentId: string | null;
+  reducedMotion: boolean;
   focusRequest: FocusRequest | null;
   jump: JumpState;
   onCancelJump: () => void;
@@ -66,7 +76,8 @@ interface TimelineViewProps {
 }
 
 export function TimelineView(props: TimelineViewProps) {
-  const { timeline, markers, filter, query, selectedId, onSelect, focusRequest } = props;
+  const { timeline, markers, filter, query, selectedId, onSelect, currentId, focusRequest } = props;
+  const { reducedMotion } = props;
   const { items, index, hasMore, total, pages } = timeline.data;
   const q = normalizeQuery(query);
   const narrowed = filter !== "all" || q !== "";
@@ -92,23 +103,38 @@ export function TimelineView(props: TimelineViewProps) {
     return height > 0 ? height : FALLBACK_VIEWPORT;
   }, []);
 
-  /** Scroll row `i` into view (centred-ish for jumps) and move keyboard focus to it. */
+  /**
+   * Scroll row `i` into view and optionally move keyboard focus to it. "jump" puts it in
+   * the upper third, "nearest" scrolls the least, "follow" (playback) scrolls only once the
+   * row leaves the view, smoothly unless reduced motion is requested.
+   */
   const reveal = useCallback(
-    (i: number, mode: "nearest" | "jump") => {
+    (i: number, mode: RevealMode, focus: boolean) => {
       const el = scrollRef.current;
       const height = measure();
       const current = el?.scrollTop ?? 0;
       const rowTop = i * ROW_HEIGHT;
+      const third = Math.max(0, rowTop - Math.floor(height / 3));
       let top = current;
-      if (mode === "jump") top = Math.max(0, rowTop - Math.floor(height / 3));
-      else if (rowTop < current) top = rowTop;
+      if (mode === "jump") top = third;
+      else if (mode === "follow") {
+        if (rowTop < current || rowTop + ROW_HEIGHT > current + height) top = third;
+      } else if (rowTop < current) top = rowTop;
       else if (rowTop + ROW_HEIGHT > current + height) top = rowTop + ROW_HEIGHT - height;
-      if (el !== null && el.scrollTop !== top) el.scrollTop = top;
+      if (el !== null && el.scrollTop !== top) {
+        if (mode === "follow" && !reducedMotion && typeof el.scrollTo === "function") {
+          el.scrollTo({ top, behavior: "smooth" });
+        } else {
+          el.scrollTop = top;
+        }
+      }
       setViewport({ top, height });
-      pendingFocus.current = i;
-      setFocusTick((n) => n + 1);
+      if (focus) {
+        pendingFocus.current = i;
+        setFocusTick((n) => n + 1);
+      }
     },
-    [measure],
+    [measure, reducedMotion],
   );
 
   useLayoutEffect(() => {
@@ -127,7 +153,7 @@ export function TimelineView(props: TimelineViewProps) {
     const i = filteredIndex.get(focusRequest.eventId);
     if (i === undefined) return;
     handledNonce.current = focusRequest.nonce;
-    reveal(i, "jump");
+    reveal(i, focusRequest.mode, focusRequest.focus);
   }, [focusRequest, filteredIndex, reveal]);
 
   useEffect(() => {
@@ -163,7 +189,7 @@ export function TimelineView(props: TimelineViewProps) {
     const to = next[event.key];
     if (to === undefined) return;
     event.preventDefault();
-    reveal(Math.min(filtered.length - 1, Math.max(0, to)), "nearest");
+    reveal(Math.min(filtered.length - 1, Math.max(0, to)), "nearest", true);
   };
 
   const first = Math.max(0, Math.floor(viewport.top / ROW_HEIGHT) - OVERSCAN);
@@ -179,7 +205,7 @@ export function TimelineView(props: TimelineViewProps) {
   const closeDetail = (): void => {
     const i = selectedId === null ? undefined : filteredIndex.get(selectedId);
     onSelect(null);
-    if (i !== undefined) reveal(i, "nearest");
+    if (i !== undefined) reveal(i, "nearest", true);
   };
 
   return (
@@ -235,6 +261,7 @@ export function TimelineView(props: TimelineViewProps) {
                     setSize={filtered.length}
                     markers={markers}
                     selected={item.event_id === selectedId}
+                    current={item.event_id === currentId}
                     tabbable={first + offset === tabbable}
                     onSelect={onSelect}
                   />
@@ -252,12 +279,14 @@ export function TimelineView(props: TimelineViewProps) {
   );
 }
 
-function Row({
+/** Memoized: a playback step re-renders only the rows whose selection or cursor changed. */
+const Row = memo(function Row({
   item,
   position,
   setSize,
   markers,
   selected,
+  current,
   tabbable,
   onSelect,
 }: {
@@ -266,6 +295,7 @@ function Row({
   setSize: number;
   markers: MarkerIndex;
   selected: boolean;
+  current: boolean;
   tabbable: boolean;
   onSelect: (eventId: string) => void;
 }) {
@@ -273,6 +303,7 @@ function Row({
   const found = markersFor(markers, item);
   const classes = ["tl-row", `tone-${kind.tone}`, `kind-${item.category}`];
   if (selected) classes.push("is-selected");
+  if (current) classes.push("is-current");
   for (const marker of found) classes.push(`has-${marker.kind.replace("_", "-")}`);
   const shown = found.slice(0, MAX_ROW_CHIPS);
   return (
@@ -289,10 +320,12 @@ function Row({
         data-event-id={item.event_id}
         data-type={item.type}
         data-testid="timeline-row"
+        data-current={current ? "true" : undefined}
         aria-current={selected ? "true" : undefined}
         tabIndex={tabbable ? 0 : -1}
         onClick={() => onSelect(item.event_id)}
       >
+        {current ? <span className="visually-hidden">Current replay event. </span> : null}
         <span className="tl-seq mono">#{formatCount(item.sequence)}</span>
         <span className="tl-rail" aria-hidden="true">
           <span className={`tl-node glyph-${kind.glyph}`} />
@@ -319,7 +352,7 @@ function Row({
       </button>
     </li>
   );
-}
+});
 
 function FirstFailureStrip({ report, reportError, onJump }: TimelineViewProps) {
   if (report === null) {

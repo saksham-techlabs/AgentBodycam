@@ -9,6 +9,9 @@ import { EMPTY_TIMELINE, appendPage, lastSequence, type LoadedTimeline } from ".
 export const JUMP_PAGE_CAP = 50;
 
 export type LoadUntilResult = "reached" | "end" | "cap" | "cancelled" | "error";
+export type LoadMoreResult = "loaded" | "end" | "cancelled" | "error";
+
+type FetchResult = "loaded" | "cancelled" | "error";
 
 export interface TimelineResource {
   data: LoadedTimeline;
@@ -20,8 +23,8 @@ export interface TimelineResource {
   error: unknown;
   /** Request the first page, once. */
   start: () => void;
-  /** Request the next page if there is one. */
-  loadMore: () => Promise<void>;
+  /** Request the next page if there is one; resolves with the outcome and the loaded data. */
+  loadMore: () => Promise<{ result: LoadMoreResult; data: LoadedTimeline }>;
   /** Live sessions: fetch events recorded after the loaded end, if everything is loaded. */
   poll: () => Promise<void>;
   /** Load pages until `sequence` is loaded, the log ends, the cap is hit or `cancel()`. */
@@ -50,7 +53,7 @@ export function useTimeline(client: ReplayApiClient, sessionId: string): Timelin
   });
   const dataRef = useRef<LoadedTimeline>(EMPTY_TIMELINE);
   const errorRef = useRef<unknown>(null);
-  const inflightRef = useRef<Promise<boolean> | null>(null);
+  const inflightRef = useRef<Promise<FetchResult> | null>(null);
   const controllerRef = useRef(new AbortController());
   const jumpRef = useRef(0);
 
@@ -60,9 +63,9 @@ export function useTimeline(client: ReplayApiClient, sessionId: string): Timelin
     return () => controller.abort();
   }, []);
 
-  /** Fetch the page after the cursor; resolves true when a page was appended. */
+  /** Fetch the page after the cursor; resolves "loaded" when a page was appended. */
   const fetchNext = useCallback(
-    (limit: number): Promise<boolean> => {
+    (limit: number): Promise<FetchResult> => {
       if (inflightRef.current !== null) return inflightRef.current;
       const signal = controllerRef.current.signal;
       setState((s) => ({ ...s, started: true, loading: true }));
@@ -74,17 +77,17 @@ export function useTimeline(client: ReplayApiClient, sessionId: string): Timelin
             signal,
           );
           const data = appendPage(dataRef.current, page);
-          if (signal.aborted) return false;
+          if (signal.aborted) return "cancelled";
           dataRef.current = data;
           errorRef.current = null;
           setState({ data, started: true, loading: false, error: null });
-          return true;
+          return "loaded";
         } catch (caught) {
-          if (signal.aborted || isAbort(caught)) return false;
+          if (signal.aborted || isAbort(caught)) return "cancelled";
           const error = caught instanceof InvalidResponseError ? new ApiError("invalid_response") : caught;
           errorRef.current = error;
           setState((s) => ({ ...s, loading: false, error }));
-          return false;
+          return "error";
         } finally {
           inflightRef.current = null;
         }
@@ -102,8 +105,11 @@ export function useTimeline(client: ReplayApiClient, sessionId: string): Timelin
   }, [fetchNext]);
 
   const loadMore = useCallback(async () => {
-    if (dataRef.current.pages > 0 && !dataRef.current.hasMore) return;
-    await fetchNext(TIMELINE_PAGE_SIZE);
+    if (dataRef.current.pages > 0 && !dataRef.current.hasMore) {
+      return { result: "end" as const, data: dataRef.current };
+    }
+    const result = await fetchNext(TIMELINE_PAGE_SIZE);
+    return { result, data: dataRef.current };
   }, [fetchNext]);
 
   const poll = useCallback(async () => {
@@ -123,12 +129,12 @@ export function useTimeline(client: ReplayApiClient, sessionId: string): Timelin
         if (lastSequence(data) >= sequence) return { result: "reached" as const, data };
         if (data.pages > 0 && !data.hasMore) return { result: "end" as const, data };
         if (fetched >= JUMP_PAGE_CAP) return { result: "cap" as const, data };
-        const ok = await fetchNext(TIMELINE_MAX_LIMIT);
+        const fetchedPage = await fetchNext(TIMELINE_MAX_LIMIT);
         fetched += 1;
         if (token !== jumpRef.current || controllerRef.current.signal.aborted) {
           return { result: "cancelled" as const, data: dataRef.current };
         }
-        if (!ok) return { result: "error" as const, data: dataRef.current };
+        if (fetchedPage !== "loaded") return { result: "error" as const, data: dataRef.current };
       }
     },
     [fetchNext],

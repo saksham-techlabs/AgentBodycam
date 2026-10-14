@@ -1,28 +1,32 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 
 import { ApiError } from "../api/errors";
-import type { ForensicReport, SessionDetail } from "../api/types";
+import type { ForensicReport, SessionDetail, TimelineItem } from "../api/types";
 import { useClient } from "../app/ClientContext";
 import type { EventRef } from "../components/Evidence";
 import { StatusBadge } from "../components/StatusBadge";
 import { ErrorBanner, ErrorState, LoadingState } from "../components/States";
 import { TopBar } from "../components/TopBar";
+import { usePlayback, type MoveCause, type SeekTarget } from "../hooks/usePlayback";
 import { usePolling } from "../hooks/usePolling";
+import { useReducedMotion } from "../hooks/useReducedMotion";
 import { useResource, type Resource } from "../hooks/useResource";
 import { useTimeline } from "../hooks/useTimeline";
 import { formatCount, formatDuration, formatUtc, plural } from "../lib/format";
+import { buildImportant } from "../lib/playback";
 import { presentation, visualState } from "../lib/sessionState";
 import {
   buildMarkers,
+  lastSequence,
   matches,
   normalizeQuery,
-  type LoadedTimeline,
   type TimelineFilter,
 } from "../lib/timeline";
 import { FilesView } from "../views/FilesView";
 import { FindingsView } from "../views/FindingsView";
 import { GitStateView } from "../views/GitStateView";
 import { OverviewView } from "../views/OverviewView";
+import { PlaybackBar } from "../views/PlaybackBar";
 import { TimelineView, type FocusRequest, type JumpState } from "../views/TimelineView";
 
 type TabId = "overview" | "timeline" | "findings" | "files" | "final";
@@ -88,54 +92,77 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
     if (tab === "timeline") startTimeline();
   }, [tab, startTimeline]);
 
-  // Latest values for the jump handler, which outlives renders while pages load.
+  const reducedMotion = useReducedMotion();
+  const nonce = useRef(0);
+  // The user closed the detail panel: automatic playback steps leave it closed.
+  const detailDismissed = useRef(false);
+
+  // Latest values for handlers that outlive renders while pages load or playback runs.
   const latest = useRef({ timeline, filter, query, markers });
   latest.current = { timeline, filter, query, markers };
-  const nonce = useRef(0);
 
-  const reveal = useCallback((eventId: string, loaded?: LoadedTimeline) => {
-    const { timeline: t, filter: f, query: q, markers: m } = latest.current;
-    const data = loaded ?? t.data;
-    const position = data.index.get(eventId);
-    const item = position === undefined ? undefined : data.items[position];
-    if (item !== undefined && !matches(item, f, normalizeQuery(q), m.failures)) {
+  /** Every playback move selects the event and brings it into view. */
+  const onMove = useCallback((item: TimelineItem, cause: MoveCause) => {
+    const { filter: f, query: q, markers: m } = latest.current;
+    if (!matches(item, f, normalizeQuery(q), m.failures)) {
       setFilter("all");
       setQuery("");
     }
-    setSelectedId(eventId);
+    const automatic = cause === "tick" || cause === "follow";
+    if (!automatic) detailDismissed.current = false;
+    if (!detailDismissed.current) setSelectedId(item.event_id);
     nonce.current += 1;
-    setFocusRequest({ eventId, nonce: nonce.current });
+    setFocusRequest({
+      eventId: item.event_id,
+      nonce: nonce.current,
+      mode: cause === "jump" || cause === "seek" ? "jump" : "follow",
+      focus: cause === "jump",
+    });
+  }, []);
+
+  const playback = usePlayback({ timeline, live, onMove });
+  const playbackRef = useRef(playback);
+  playbackRef.current = playback;
+  const important = useMemo(
+    () => buildImportant(report.data, timeline.data.items),
+    [report.data, timeline.data.items],
+  );
+
+  const seekTo = useCallback(async (target: SeekTarget, cause: MoveCause) => {
+    const data = latest.current.timeline.data;
+    const loaded =
+      target.eventId !== null ? data.index.has(target.eventId) : lastSequence(data) >= target.sequence;
+    setJump(loaded ? IDLE : { status: "loading", sequence: target.sequence });
+    const result = await playbackRef.current.seek(target, cause);
+    if (result === "cancelled") return;
+    if (result === "reached" || result === "error") setJump(IDLE);
+    else setJump({ status: result === "cap" ? "cap" : "absent", sequence: target.sequence });
   }, []);
 
   const jumpTo = useCallback(
     async (ref: EventRef) => {
       setTab("timeline");
-      const t = latest.current.timeline;
-      if (t.data.index.has(ref.eventId)) {
-        setJump(IDLE);
-        reveal(ref.eventId);
-        return;
-      }
-      if (ref.sequence === null) {
-        t.start();
+      const data = latest.current.timeline.data;
+      const position = data.index.get(ref.eventId);
+      const sequence = ref.sequence ?? (position === undefined ? null : data.items[position]?.sequence);
+      if (sequence === null || sequence === undefined) {
+        playbackRef.current.pause();
+        latest.current.timeline.start();
         setJump({ status: "unloaded" });
         return;
       }
-      setJump({ status: "loading", sequence: ref.sequence });
-      const { result, data: loaded } = await t.loadUntil(ref.sequence);
-      if (result === "cancelled") return;
-      if (loaded.index.has(ref.eventId)) {
-        setJump(IDLE);
-        reveal(ref.eventId, loaded);
-      } else if (result === "error") {
-        setJump(IDLE);
-      } else {
-        setJump({ status: result === "cap" ? "cap" : "absent", sequence: ref.sequence });
-      }
+      await seekTo({ sequence, eventId: ref.eventId }, "jump");
     },
-    [reveal],
+    [seekTo],
   );
   const onJump = useCallback((ref: EventRef) => void jumpTo(ref), [jumpTo]);
+  const onSeek = useCallback((target: SeekTarget) => void seekTo(target, "seek"), [seekTo]);
+
+  const onSelect = useCallback((eventId: string | null) => {
+    setSelectedId(eventId);
+    detailDismissed.current = eventId === null;
+    if (eventId !== null) playbackRef.current.select(eventId);
+  }, []);
 
   const cancelJump = useCallback(() => {
     latest.current.timeline.cancelLoadUntil();
@@ -143,6 +170,7 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
   }, []);
 
   const chooseTab = (id: TabId): void => {
+    if (id !== "timeline") playback.pause();
     setTab(id);
     setFocusRequest(null);
   };
@@ -206,23 +234,35 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
               {tab === "overview" ? (
                 <OverviewView detail={data} />
               ) : tab === "timeline" ? (
-                <TimelineView
-                  timeline={timeline}
-                  markers={markers}
-                  report={report.data}
-                  reportError={report.error}
-                  live={live}
-                  filter={filter}
-                  onFilter={setFilter}
-                  query={query}
-                  onQuery={setQuery}
-                  selectedId={selectedId}
-                  onSelect={setSelectedId}
-                  focusRequest={focusRequest}
-                  jump={jump}
-                  onCancelJump={cancelJump}
-                  onJump={onJump}
-                />
+                <div className="replay">
+                  <PlaybackBar
+                    playback={playback}
+                    important={important}
+                    markers={markers}
+                    live={live}
+                    pageError={timeline.error}
+                    onSeek={onSeek}
+                  />
+                  <TimelineView
+                    timeline={timeline}
+                    markers={markers}
+                    report={report.data}
+                    reportError={report.error}
+                    live={live}
+                    filter={filter}
+                    onFilter={setFilter}
+                    query={query}
+                    onQuery={setQuery}
+                    selectedId={selectedId}
+                    onSelect={onSelect}
+                    currentId={playback.current?.event_id ?? null}
+                    reducedMotion={reducedMotion}
+                    focusRequest={focusRequest}
+                    jump={jump}
+                    onCancelJump={cancelJump}
+                    onJump={onJump}
+                  />
+                </div>
               ) : (
                 <ReportTab report={report}>
                   {(r) =>

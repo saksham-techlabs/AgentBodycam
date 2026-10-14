@@ -123,8 +123,9 @@ def build_parser() -> argparse.ArgumentParser:
             "test/build/lint/typecheck results, and a deterministic, read-only forensic "
             "report of a recorded session (`agentbodycam analyze`), served locally by a "
             "read-only, authenticated Replay API (`agentbodycam replay-api`) and browsable "
-            "in an early local Replay UI (`agentbodycam replay`; session dashboard and "
-            "overview only). Other terminal commands and agent internals are not captured."
+            "in an early local Replay UI (`agentbodycam replay`; sessions, timeline with "
+            "playback controls, findings). Other terminal commands and agent internals are "
+            "not captured."
         ),
         formatter_class=argparse.RawDescriptionHelpFormatter,
     )
@@ -320,8 +321,9 @@ def build_parser() -> argparse.ArgumentParser:
             "Serve the Replay UI and the Replay API from one loopback address, then open the "
             "printed address in your browser. Runs in the foreground until Ctrl+C. The UI "
             "is under development: it lists recorded sessions and shows each session's "
-            "overview, paginated timeline, findings, observed files and last recorded Git "
-            "state; cinematic playback and export are not built yet.\n\n"
+            "overview, paginated timeline with playback controls and a scrubber, findings, "
+            "observed files and last recorded Git state; the final cinematic styling and "
+            "export are not built yet.\n\n"
             "Security: listens on 127.0.0.1 (or ::1 / localhost) only. The UI ships inside "
             "the package (no Node.js needed) and is served from the API's own origin, so no "
             "CORS is involved. A new random API token is created at startup, held in memory "
@@ -834,7 +836,7 @@ def _serve_replay(
             f"Project: {_display(str(project.resolve()))}\n"
             f"Listening: {server.url}\n"
             f"Open in your browser: {server.url}/\n"
-            "The Replay UI is under development: no cinematic playback or export yet.\n"
+            "The Replay UI is under development: playback controls exist; export does not.\n"
             "Access is granted automatically to the page served at this address; the "
             "address contains no secret and nothing is stored in your browser.\n"
             "Read-only, loopback only.\n"

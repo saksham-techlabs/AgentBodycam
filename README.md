@@ -11,11 +11,11 @@
 > recorded session (`agentbodycam analyze`), it can serve recorded evidence through a
 > local, authenticated, read-only Replay API (`agentbodycam replay-api`), and it has a
 > local Replay UI under development (`agentbodycam replay`: dashboard, session overview,
-> paginated forensic timeline with failure / recovery / unresolved markers, findings,
-> observed files and the last recorded Git / final state). It does not observe arbitrary
-> terminal commands and does not integrate with any specific agent. Cinematic playback and
-> scrubbing, file contents and diffs, share/export and an AI analyst do not exist yet.
-> Expect breaking changes.
+> paginated forensic timeline with failure / recovery / unresolved markers, replay
+> playback controls and a scrubber, findings, observed files and the last recorded Git /
+> final state). It does not observe arbitrary terminal commands and does not integrate
+> with any specific agent. The final cinematic styling of the replay, file contents and
+> diffs, share/export and an AI analyst do not exist yet. Expect breaking changes.
 >
 > Implemented:
 > - file recording
@@ -26,11 +26,14 @@
 > - Replay UI (under development): dashboard, session overview, paginated forensic
 >   timeline, first-failure / recovery / unresolved markers, findings view, observed
 >   files view, last-recorded Git and final-state view
+> - Replay playback (under development): play/pause, 0.5x-4x speed, a sequence-based
+>   scrubber with failure / recovery / unresolved markers, important-event navigation
+>   and keyboard shortcuts, over the recorded evidence events (no screen video exists)
 >
 > Still not implemented:
-> - cinematic playback and scrubbing
+> - final cinematic visual polish of the replay
 > - file contents and diffs
-> - share/export (cards, video)
+> - share/export (cards, GIF, video)
 > - agent-specific adapters
 > - optional AI analyst
 
@@ -71,7 +74,7 @@ It is designed to be:
 | Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
 | Local forensics engine (`analyze`) | Implemented (deterministic, read-only, observed findings only) |
 | Local Replay API (`replay-api`) | Implemented (loopback only, temporary bearer token, read-only, standard library only) |
-| Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, findings, observed files, last recorded Git/final state; no cinematic playback, no export |
+| Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, replay playback controls and scrubber, findings, observed files, last recorded Git/final state; no final cinematic polish, no export |
 | Share/export | Not started |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
 | Optional AI analysis | Not started |
@@ -172,7 +175,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: agent integrations, cinematic playback, export or AI.
+- Not yet: agent integrations, final cinematic replay styling, export or AI.
 
 ### Recording commands you run
 
@@ -362,7 +365,7 @@ AgentBodycam Replay (UI preview)
 Project: C:\work\app
 Listening: http://127.0.0.1:54321
 Open in your browser: http://127.0.0.1:54321/
-The Replay UI is under development: no cinematic playback or export yet.
+The Replay UI is under development: playback controls exist; export does not.
 Access is granted automatically to the page served at this address; the address contains no secret and nothing is stored in your browser.
 Read-only, loopback only.
 Press Ctrl+C to stop.
@@ -386,6 +389,18 @@ run time). Today it shows:
   Filters (All, Files, Git, Commands, Checks, Errors, Failures only) and the search box
   cover loaded events only and never reorder them. Selecting an event shows its safe
   fields (sequence, event ID, time, type, source, path, command ID, evidence);
+- **replay playback** above the timeline: Play / Pause (Replay at the end), previous /
+  next event, previous / next important event, speed 0.5x / 1x / 2x / 4x and a scrubber
+  over event sequence numbers (not time) that shows how many events are loaded, with
+  markers for the first observable failure, check failures, observed recoveries and
+  unresolved failures. Playback steps through the recorded evidence events one at a time
+  at a fixed pace (800 ms per event at 1x); it does not reproduce the real time between
+  events, and AgentBodycam records no screen video. The event being replayed is
+  highlighted in the timeline, shown in a "Now replaying" card and in the detail panel.
+  Keyboard: Space play/pause, ←/→ previous/next event, Shift+←/→ previous/next important
+  event (not while typing). Further pages load automatically as playback reaches them;
+  for a live recording, playback stops at the LIVE EDGE and only advances to newly
+  recorded events if you turn on "Follow live";
 - a **Findings** tab: first observable failure, observed recoveries (with the file changes
   observed between the failed and later passing runs), unresolved failures, incomplete
   commands, errors observed and evidence notes; every reference can jump to its event;
@@ -395,9 +410,9 @@ run time). Today it shows:
 
 All findings are observed facts from the recording: the UI never attributes a failure or
 a recovery to a file change. While a session is live the report and timeline refresh
-every 2.5 s (never overlapping, paused while the browser tab is hidden). Cinematic
-playback and scrubbing, file contents and diffs, export and sharing are **not implemented
-yet**.
+every 2.5 s (never overlapping, paused while the browser tab is hidden); playback pauses
+too while the tab is hidden. The final cinematic visual polish of the replay, file
+contents and diffs, GIF/video export and sharing are **not implemented yet**.
 
 How the page gets API access: the page asks its own server for the temporary token with a
 same-origin `fetch()` (`GET /ui/bootstrap`, which requires a custom header and browser
