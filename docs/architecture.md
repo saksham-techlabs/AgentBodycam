@@ -1094,6 +1094,15 @@ use only `GET /api/v1/sessions/<id>`, `/report` and `/timeline?after_sequence=N&
 - *Live sessions*: the existing 2.5 s poller refreshes the session detail and report and
   appends new timeline pages from the last cursor (no overlap, paused while hidden, stopped
   on unmount, session change or when recording stops, followed by one final refresh).
+  Polling continues through transient failures (an unreachable or restarting server; a
+  restarted server's new token is picked up by the client's one re-bootstrap), and a
+  failed timeline request is retried on the next refresh, so a live view recovers without
+  a reload; a malformed page is never retried. Fatal errors stop polling and replace the
+  page with an error state: the session detail answering 400, 401 (after the
+  re-bootstrap), 403, 404 or 500, or the report or timeline answering 404. Playback is
+  paused, any jump cancelled, the selection cleared and the export dialog closed, so no
+  stale replay stays on screen. A live poll that finds nothing new keeps the same loaded
+  timeline object (no re-render, no index copy).
   A report briefly ahead of or behind the loaded timeline during recording is expected.
 
 No wording attributes a failure or recovery to a file change; the UI shows no raw event
@@ -1132,7 +1141,8 @@ and not real-time: timestamps are display metadata only.
   sequence and bucketed to at most 200; they form one roving-tabindex toolbar.
 - *Live*: playback stops at the newest recorded event (LIVE EDGE). With "Follow live" on
   and playback paused at the edge, new events from the 2.5 s poller move the cursor to
-  the newest one; playback never polls on its own.
+  the newest one, including the final read after the recording stops; playback never
+  polls on its own.
 - *Keyboard*: Space, ←/→, Shift+←/→ on `document`, ignored in text-entry controls, with
   Ctrl/Alt/Meta, when another handler already handled the key (tabs, marker rail) and,
   for Space, on buttons, links and checkboxes, which keep their own activation.
@@ -1151,10 +1161,14 @@ timing model, pagination, API and event schemas are unchanged.
   single line where the theater is sticky) when the window is at least 900 × 720 px.
   There the timeline gets a height (`--replay-timeline-height`) that keeps its rows
   below the theater at every scroll position, and the detail panel scrolls on its own
-  (beside the timeline above 1100 px, capped below the theater when stacked). Smaller
-  windows get a normal, non-sticky theater with wrapping controls. An opaque square
-  underlay behind the rounded surface keeps scrolled content from showing at its corners
-  (no backdrop blur). No scroll listeners.
+  (beside the timeline above 1100 px, capped below the theater when stacked). Both are
+  derived from the theater's measured height (`--replay-theater-height`, published on
+  the `.replay` container by one `ResizeObserver`, removed on unmount; a fixed fallback
+  applies without it), so a playback alert or wrapped controls never push rows under the
+  theater. The control row wraps by the theater's own width (a CSS container query), not
+  the window's. Smaller windows get a normal, non-sticky theater with wrapping controls.
+  An opaque square underlay behind the rounded surface keeps scrolled content from
+  showing at its corners (no backdrop blur). No scroll listeners.
 - *Current-event hero*: same safe `TimelineItem` fields as before. Its emphasis comes from
   `replayMoment()` (`lib/playback.ts`), which reads only report markers, then the recorded
   event type: first observable failure (strongest red), unresolved and other failures
@@ -1309,7 +1323,9 @@ ForensicReport ──buildShareModel()──▶ ShareCardModel ──buildShareC
   `final_checks_passing`, `final_checks_failing`. It is not the raw report.
 - **Download.** Fixed file names `agentbodycam-replay.svg` and
   `agentbodycam-summary.json`; a Blob, a temporary object URL and a hidden `<a download>`
-  that is removed and whose URL is revoked immediately after the click.
+  that is removed right after the click. The URL is revoked 1 s later (immediately if the
+  click throws), so the browser can still read the Blob; the timer is independent of the
+  dialog, so closing it cannot leak the URL.
 - **PNG** is not offered: drawing the SVG into a canvas would need a `blob:` or `data:`
   image source, which the UI's `img-src 'self'` deliberately forbids.
 
@@ -1365,9 +1381,16 @@ ShareCardModel ──planReplayClip()──▶ ReplayClipTimeline ──drawClip
 - **Cleanup.** On every outcome, before the promise settles, the frame timer and encode
   timeout are cleared, the abort listener removed, the recorder's handlers detached and
   the recorder stopped if still active, every stream track stopped, buffered chunks
-  dropped and the canvas shrunk to 0 × 0. The dialog's `useClipExport` hook runs one
-  export at a time (a ref guards against duplicate clicks), aborts it on Cancel, on Close
-  / Escape and on unmount, and ignores results that arrive after an abort.
+  dropped and the canvas shrunk to 0 × 0. An exception while drawing a frame settles the
+  export as a `recorder` error with the same cleanup. The dialog's `useClipExport` hook
+  runs one export at a time (a ref guards against duplicate clicks) and gives every run an
+  ID: Cancel, Close / Escape and unmount abort the run and advance the ID, and progress,
+  results and errors from any run but the current one are ignored, so a late callback
+  can never overwrite a newer export. A failing download step is reported ("The clip was
+  created but could not be saved. No file was saved."). Cancel takes a slot that is always
+  laid out before Export WebM, so starting an export never moves the button under the
+  pointer; Cancel returns focus to Export WebM. While an export runs, a click on the
+  backdrop is ignored (Close and Escape still cancel it).
 - **Download.** Fixed file name `agentbodycam-replay.webm` (no project, session, user or
   time). The object URL is revoked 2 s after the click rather than immediately: a
   multi-megabyte Blob may still be read by the browser's download manager after `click()`

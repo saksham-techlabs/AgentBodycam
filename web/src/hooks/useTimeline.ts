@@ -25,7 +25,10 @@ export interface TimelineResource {
   start: () => void;
   /** Request the next page if there is one; resolves with the outcome and the loaded data. */
   loadMore: () => Promise<{ result: LoadMoreResult; data: LoadedTimeline }>;
-  /** Live sessions: fetch events recorded after the loaded end, if everything is loaded. */
+  /**
+   * Refresh: fetch events recorded after the loaded end if everything is loaded, or retry
+   * the request that failed last (never one rejected as malformed).
+   */
   poll: () => Promise<void>;
   /** Load pages until `sequence` is loaded, the log ends, the cap is hit or `cancel()`. */
   loadUntil: (sequence: number) => Promise<{ result: LoadUntilResult; data: LoadedTimeline }>;
@@ -76,8 +79,18 @@ export function useTimeline(client: ReplayApiClient, sessionId: string): Timelin
             { afterSequence: dataRef.current.cursor, limit },
             signal,
           );
-          const data = appendPage(dataRef.current, page);
+          const before = dataRef.current;
+          const appended = appendPage(before, page);
           if (signal.aborted) return "cancelled";
+          // An empty live poll keeps the same object, so nothing derived from it recomputes.
+          const data =
+            before.pages > 0 &&
+            appended.items === before.items &&
+            appended.hasMore === before.hasMore &&
+            appended.total === before.total &&
+            appended.cursor === before.cursor
+              ? before
+              : appended;
           dataRef.current = data;
           errorRef.current = null;
           setState({ data, started: true, loading: false, error: null });
@@ -115,8 +128,10 @@ export function useTimeline(client: ReplayApiClient, sessionId: string): Timelin
   const poll = useCallback(async () => {
     const data = dataRef.current;
     const error = errorRef.current;
-    if (data.pages === 0 || data.hasMore) return;
     if (error instanceof ApiError && error.kind === "invalid_response") return;
+    // New events are read only past the loaded end; a failed request is retried, so the
+    // timeline recovers on the next refresh after the server is reachable again.
+    if (error === null && (data.pages === 0 || data.hasMore)) return;
     await fetchNext(TIMELINE_PAGE_SIZE);
   }, [fetchNext]);
 

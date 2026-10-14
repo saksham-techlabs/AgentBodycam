@@ -257,11 +257,16 @@ export function appendPage(loaded: LoadedTimeline, page: TimelinePage): LoadedTi
     throw new InvalidResponseError();
   }
   if (page.total < loaded.items.length + page.items.length) throw new InvalidResponseError();
-  const index = new Map(loaded.index);
-  page.items.forEach((item, offset) => {
-    if (index.has(item.event_id)) throw new InvalidResponseError();
-    index.set(item.event_id, loaded.items.length + offset);
-  });
+  // A live poll that finds nothing new must not copy an index of thousands of events.
+  let index = loaded.index;
+  if (page.items.length > 0) {
+    const next = new Map(loaded.index);
+    page.items.forEach((item, offset) => {
+      if (next.has(item.event_id)) throw new InvalidResponseError();
+      next.set(item.event_id, loaded.items.length + offset);
+    });
+    index = next;
+  }
   return {
     items: page.items.length === 0 ? loaded.items : [...loaded.items, ...page.items],
     index,

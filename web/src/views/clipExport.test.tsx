@@ -3,8 +3,10 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ReplayApiClient } from "../api/client";
 import { App } from "../app/App";
+import { VIDEO_REVOKE_DELAY_MS } from "../lib/download";
 import { FakeServer, STOPPED_ID } from "../test/fakeServer";
 import { CAUSAL } from "../test/fixtures";
+import { FORBIDDEN, hostileReport } from "../test/hostile";
 import { installMediaMocks, type MediaMockOptions, type MediaMocks } from "../test/media";
 
 const CLIP_MS = 12_000;
@@ -214,6 +216,146 @@ describe("replay clip export", () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it("exports again after a success, and after a cancellation, saving one file per completed run", async () => {
+    const dialog = await openClip();
+    fireEvent.click(exportButton(dialog));
+    await advance(CLIP_MS + 100);
+    expect(status(dialog)).toHaveTextContent("Done");
+
+    fireEvent.click(exportButton(dialog));
+    expect(status(dialog)).toHaveTextContent("Rendering 0%");
+    await advance(1500);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    expect(status(dialog)).toHaveTextContent(/^$/);
+
+    fireEvent.click(exportButton(dialog));
+    await advance(CLIP_MS + 100);
+    expect(status(dialog)).toHaveTextContent("Done · saved agentbodycam-replay.webm (4 KB)");
+    expect(media().recorders).toHaveLength(3);
+    expect(clicks.map((c) => c.href)).toEqual(["blob:local/1", "blob:local/2"]);
+    await advance(VIDEO_REVOKE_DELAY_MS);
+    expect(revoked).toEqual(["blob:local/1", "blob:local/2"]);
+    expect(tracksStopped()).toBe(true);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("survives repeated opening and closing, mid-export or not, and still exports", async () => {
+    const dialog = await openClip();
+    const openButton = screen.getByRole("button", { name: "Export" });
+    fireEvent.click(exportButton(dialog));
+    await advance(1000);
+    for (let i = 0; i < 4; i += 1) {
+      const open = screen.getByRole("dialog");
+      if (i % 2 === 0) fireEvent.keyDown(open, { key: "Escape" });
+      else fireEvent.click(within(open).getByRole("button", { name: "Close" }));
+      expect(screen.queryByRole("dialog")).toBeNull();
+      expect(openButton).toHaveFocus();
+      fireEvent.click(openButton);
+      fireEvent.click(within(screen.getByRole("dialog")).getByRole("button", { name: /Replay clip/ }));
+      if (i === 1) fireEvent.click(exportButton(screen.getByRole("dialog")));
+      await advance(500);
+    }
+    expect(screen.getAllByRole("dialog")).toHaveLength(1);
+    const fresh = screen.getByRole("dialog");
+    expect(status(fresh)).toHaveTextContent(/^$/);
+    fireEvent.click(exportButton(fresh));
+    await advance(CLIP_MS + 100);
+    expect(status(fresh)).toHaveTextContent("Done");
+    expect(clicks).toHaveLength(1);
+    expect(media().recorders.every((r) => r.state === "inactive")).toBe(true);
+    expect(tracksStopped()).toBe(true);
+    expect(media().streams).toHaveLength(media().recorders.length);
+    await advance(VIDEO_REVOKE_DELAY_MS);
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("leaks no stream track, recorder handler or object URL across success, cancel, error and unmount", async () => {
+    const dialog = await openClip();
+    fireEvent.click(exportButton(dialog));
+    await advance(CLIP_MS + 100);
+    fireEvent.click(exportButton(dialog));
+    await advance(500);
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.click(exportButton(dialog));
+    await advance(500);
+    act(() => media().recorders[2]?.fail());
+    await advance(0);
+    fireEvent.click(exportButton(dialog));
+    await advance(500);
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await advance(CLIP_MS + VIDEO_REVOKE_DELAY_MS);
+
+    expect(media().streams).toHaveLength(4);
+    expect(tracksStopped()).toBe(true);
+    expect(media().recorders.every((r) => r.state === "inactive")).toBe(true);
+    expect(media().recorders.every((r) => r.ondataavailable === null && r.onstop === null && r.onerror === null)).toBe(
+      true,
+    );
+    expect(blobs).toHaveLength(1);
+    expect(revoked).toEqual(["blob:local/1"]);
+    expect(document.querySelector("a[download]")).toBeNull();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
+  it("keeps Export WebM in place and focus inside the dialog when Cancel appears and goes", async () => {
+    const dialog = await openClip();
+    const button = exportButton(dialog);
+    const actions = button.parentElement;
+    if (actions === null) throw new Error("no actions");
+    const slots = Array.from(actions.children);
+    expect(slots).toHaveLength(2);
+    expect(within(dialog).queryByRole("button", { name: "Cancel" })).toBeNull();
+    expect(within(dialog).queryByRole("progressbar")).toBeNull();
+
+    button.focus();
+    fireEvent.click(button);
+    // Same elements in the same order: nothing moved under the pointer.
+    expect(Array.from(actions.children)).toEqual(slots);
+    const cancel = within(dialog).getByRole("button", { name: "Cancel" });
+    expect(cancel).toBe(slots[0]);
+    expect(within(dialog).getByRole("progressbar")).toBeInTheDocument();
+
+    await advance(1000);
+    cancel.focus();
+    fireEvent.click(cancel);
+    expect(exportButton(dialog)).toHaveFocus();
+    expect(cancel).toBeDisabled();
+    expect(Array.from(actions.children)).toEqual(slots);
+  });
+
+  it("ignores a backdrop click during an export, and a drag that ends outside the dialog", async () => {
+    const dialog = await openClip();
+    const backdrop = dialog.parentElement;
+    if (backdrop === null) throw new Error("no backdrop");
+    fireEvent.click(exportButton(dialog));
+    await advance(1000);
+    fireEvent.mouseDown(backdrop);
+    fireEvent.click(backdrop);
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    expect(status(dialog)).toHaveTextContent(/Rendering/);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: "Cancel" }));
+    fireEvent.mouseDown(dialog);
+    fireEvent.click(backdrop);
+    expect(screen.getByRole("dialog")).toBe(dialog);
+    fireEvent.mouseDown(backdrop);
+    fireEvent.click(backdrop);
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+
+  it("keeps keyboard focus trapped even when focus sits on the dialog itself", async () => {
+    const dialog = await openClip();
+    const focusable = within(dialog)
+      .getAllByRole("button")
+      .filter((b) => !b.hasAttribute("disabled"));
+    dialog.focus();
+    fireEvent.keyDown(dialog, { key: "Tab", shiftKey: true });
+    expect(focusable.at(-1)).toHaveFocus();
+    dialog.focus();
+    fireEvent.keyDown(dialog, { key: "Tab" });
+    expect(focusable[0]).toHaveFocus();
+  });
+
   it("makes no network request while planning, rendering, encoding or downloading", async () => {
     const dialog = await openClip();
     const before = server.requests.length;
@@ -222,18 +364,57 @@ describe("replay clip export", () => {
     const xhr = vi.spyOn(XMLHttpRequest.prototype, "open");
     const beacon = vi.fn(() => false);
     Object.defineProperty(navigator, "sendBeacon", { value: beacon, configurable: true });
+    const socket = vi.fn();
+    const source = vi.fn();
+    vi.stubGlobal("WebSocket", socket);
+    vi.stubGlobal("EventSource", source);
     try {
       fireEvent.click(exportButton(dialog));
       await advance(CLIP_MS + 100);
       await advance(2_000);
-      expect(clicks).toHaveLength(1);
+      fireEvent.click(within(dialog).getByRole("button", { name: /Share card/ }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Download SVG" }));
+      fireEvent.click(within(dialog).getByRole("button", { name: /JSON summary/ }));
+      fireEvent.click(within(dialog).getByRole("button", { name: "Download JSON summary" }));
+      await advance(2_000);
+      expect(clicks).toHaveLength(3);
       expect(server.requests.length).toBe(before);
       expect(fetchSpy).not.toHaveBeenCalled();
       expect(xhr).not.toHaveBeenCalled();
       expect(beacon).not.toHaveBeenCalled();
-      expect(clicks[0]?.href.startsWith("blob:")).toBe(true);
+      expect(socket).not.toHaveBeenCalled();
+      expect(source).not.toHaveBeenCalled();
+      expect(clicks.every((c) => c.href.startsWith("blob:"))).toBe(true);
     } finally {
       Reflect.deleteProperty(navigator, "sendBeacon");
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it("keeps hostile report data out of the dialog, the clip frames, the SVG and the JSON", async () => {
+    server.reports.set(STOPPED_ID, hostileReport());
+    const dialog = await openClip();
+    fireEvent.click(exportButton(dialog));
+    await advance(CLIP_MS + 100);
+    await advance(VIDEO_REVOKE_DELAY_MS);
+    expect(clicks.map((c) => c.download)).toEqual(["agentbodycam-replay.webm"]);
+    const drawn = media().contexts.flatMap((c) => c.drawn.map((d) => d.text));
+    expect(drawn.length).toBeGreaterThan(0);
+
+    fireEvent.click(within(dialog).getByRole("button", { name: /Share card/ }));
+    const preview = within(dialog).getByRole("img", { name: "Share card preview" }).outerHTML;
+    fireEvent.click(within(dialog).getByRole("button", { name: "Download SVG" }));
+    fireEvent.click(within(dialog).getByRole("button", { name: /JSON summary/ }));
+    fireEvent.click(within(dialog).getByRole("button", { name: "Download JSON summary" }));
+    expect(clicks.map((c) => c.download)).toEqual([
+      "agentbodycam-replay.webm",
+      "agentbodycam-replay.svg",
+      "agentbodycam-summary.json",
+    ]);
+    const files = await Promise.all(blobs.slice(1).map((b) => b.text()));
+    for (const text of [...drawn, preview, dialog.textContent ?? "", ...files]) {
+      for (const leak of FORBIDDEN) expect(text).not.toContain(leak);
+      expect(text).not.toMatch(CAUSAL);
     }
   });
 });

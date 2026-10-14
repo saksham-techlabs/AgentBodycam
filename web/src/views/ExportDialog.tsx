@@ -68,20 +68,22 @@ function ClipPanel({ timeline, support, status }: { timeline: ReplayClipTimeline
         Built only from the share card's approved data: counts, event numbers and check results.
         {timeline.live ? " This session is still recording, so the clip is a live snapshot." : ""}
       </p>
-      {status.phase === "idle" ? null : (
-        <div className="export-clip-progress">
-          <div
-            className="export-clip-bar"
-            role="progressbar"
-            aria-label="Replay clip export progress"
-            aria-valuemin={0}
-            aria-valuemax={100}
-            aria-valuenow={percent}
-          >
-            <span style={{ width: `${percent}%` }} />
-          </div>
+      {/* Always laid out, so starting an export never shifts the buttons below it. */}
+      <div
+        className={status.phase === "idle" ? "export-clip-progress is-idle" : "export-clip-progress"}
+        aria-hidden={status.phase === "idle" ? true : undefined}
+      >
+        <div
+          className="export-clip-bar"
+          role="progressbar"
+          aria-label="Replay clip export progress"
+          aria-valuemin={0}
+          aria-valuemax={100}
+          aria-valuenow={percent}
+        >
+          <span style={{ width: `${percent}%` }} />
         </div>
-      )}
+      </div>
       <p
         className={status.phase === "error" ? "export-clip-status is-error" : "export-clip-status"}
         role="status"
@@ -105,6 +107,8 @@ export function ExportDialog({ report, onClose }: { report: ForensicReport; onCl
   const previewId = useId();
   const dialogRef = useRef<HTMLDivElement>(null);
   const closeRef = useRef<HTMLButtonElement>(null);
+  const clipButtonRef = useRef<HTMLButtonElement>(null);
+  const backdropPress = useRef(false);
   const [format, setFormat] = useState<Format>("card");
 
   const model = useMemo(() => buildShareModel(report), [report]);
@@ -131,17 +135,41 @@ export function ExportDialog({ report, onClose }: { report: ForensicReport; onCl
     const first = focusable[0];
     const last = focusable.at(-1);
     if (first === undefined || last === undefined) return;
-    if (event.shiftKey && document.activeElement === first) {
+    const active = document.activeElement;
+    if (active === dialogRef.current || !(active instanceof HTMLElement) || !focusable.includes(active)) {
+      // Focus sits on the dialog itself (after a click on plain content) or on a control
+      // that was just disabled: Tab must still wrap inside the dialog.
+      event.preventDefault();
+      (event.shiftKey ? last : first).focus();
+    } else if (event.shiftKey && active === first) {
       event.preventDefault();
       last.focus();
-    } else if (!event.shiftKey && document.activeElement === last) {
+    } else if (!event.shiftKey && active === last) {
       event.preventDefault();
       first.focus();
     }
   };
 
+  const cancelClip = (): void => {
+    clip.cancel();
+    // The Cancel button is about to be disabled; keep focus inside the dialog.
+    clipButtonRef.current?.focus();
+  };
+
   return (
-    <div className="export-backdrop" onMouseDown={(e) => e.target === e.currentTarget && onClose()}>
+    // A click outside closes the dialog only when it both starts and ends on the backdrop,
+    // and never while a clip is being exported: losing a running export takes Close or Escape.
+    <div
+      className="export-backdrop"
+      onMouseDown={(e) => {
+        backdropPress.current = e.target === e.currentTarget;
+      }}
+      onClick={(e) => {
+        const outside = backdropPress.current && e.target === e.currentTarget;
+        backdropPress.current = false;
+        if (outside && !busy) onClose();
+      }}
+    >
       <div
         ref={dialogRef}
         className="export-dialog"
@@ -150,6 +178,7 @@ export function ExportDialog({ report, onClose }: { report: ForensicReport; onCl
         aria-labelledby={titleId}
         aria-describedby={noteId}
         data-testid="export-dialog"
+        tabIndex={-1}
         onKeyDown={onKeyDown}
       >
         <header className="export-head">
@@ -233,12 +262,19 @@ export function ExportDialog({ report, onClose }: { report: ForensicReport; onCl
             </button>
           ) : format === "clip" ? (
             <div className="export-clip-actions">
-              {busy ? (
-                <button type="button" className="button button-ghost" onClick={clip.cancel}>
-                  Cancel
-                </button>
-              ) : null}
+              {/* The Cancel slot keeps its place while idle, so it never appears under the pointer. */}
               <button
+                type="button"
+                className={busy ? "button button-ghost" : "button button-ghost is-placeholder"}
+                onClick={busy ? cancelClip : undefined}
+                disabled={!busy}
+                aria-hidden={busy ? undefined : true}
+                tabIndex={busy ? undefined : -1}
+              >
+                Cancel
+              </button>
+              <button
+                ref={clipButtonRef}
                 type="button"
                 className="button button-primary"
                 disabled={!support.supported}

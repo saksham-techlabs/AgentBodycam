@@ -409,6 +409,20 @@ describe("recordReplayClip", () => {
     await released();
   });
 
+  it("fails cleanly, instead of hanging with live tracks, when drawing a frame throws", async () => {
+    mocks = installMediaMocks();
+    const run = start();
+    await vi.advanceTimersByTimeAsync(500);
+    const ctx = mocks.contexts[0]?.ctx;
+    if (ctx === undefined) throw new Error("no context");
+    ctx.fillText = () => {
+      throw new Error("canvas lost");
+    };
+    await vi.advanceTimersByTimeAsync(2000);
+    expect((run.outcome() as { error: ClipExportError }).error.code).toBe("recorder");
+    await released();
+  });
+
   it("rejects a zero-byte result", async () => {
     mocks = installMediaMocks({ chunkBytes: 0 });
     const run = start();

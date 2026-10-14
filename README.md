@@ -454,8 +454,12 @@ run time). Today it shows:
 All findings are observed facts from the recording: the UI never attributes a failure or
 a recovery to a file change. While a session is live the report and timeline refresh
 every 2.5 s (never overlapping, paused while the browser tab is hidden); playback pauses
-too while the tab is hidden. File contents and diffs, GIF and MP4 export and hosted
-sharing are **not implemented yet**.
+too while the tab is hidden. If the server is briefly unreachable or restarted, the live
+view keeps refreshing and catches up on its own; if the session disappears or access is
+refused, the page shows an error instead of stale data. The UI is developed and tested in
+Chromium-based browsers; other browsers are not verified yet (the WebM clip needs
+`MediaRecorder` and canvas capture streams). File contents and diffs, GIF and MP4 export
+and hosted sharing are **not implemented yet**.
 
 How the page gets API access: the page asks its own server for the temporary token with a
 same-origin `fetch()` (`GET /ui/bootstrap`, which requires a custom header and browser

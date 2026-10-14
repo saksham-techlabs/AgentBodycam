@@ -66,6 +66,7 @@ describe("appendPage", () => {
     const t = loaded(page(0, RICH_TIMELINE, 21));
     const next = appendPage(t, page(21, [], 21));
     expect(next.items).toBe(t.items);
+    expect(next.index).toBe(t.index);
     expect(next.cursor).toBe(21);
   });
 });

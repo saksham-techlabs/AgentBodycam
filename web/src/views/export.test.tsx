@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 import { ReplayApiClient } from "../api/client";
 import { App } from "../app/App";
+import { TEXT_REVOKE_DELAY_MS } from "../lib/download";
 import { CAUSAL, eventId } from "../test/fixtures";
 import { FakeServer, STOPPED_ID, TOKEN } from "../test/fakeServer";
 
@@ -31,6 +32,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.useRealTimers();
   vi.restoreAllMocks();
 });
 
@@ -65,9 +67,14 @@ describe("export dialog", () => {
   it("downloads the previewed card as agentbodycam-replay.svg and revokes the URL", async () => {
     const dialog = await openExport();
     const preview = within(dialog).getByRole("img", { name: "Share card preview" });
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     fireEvent.click(within(dialog).getByRole("button", { name: "Download SVG" }));
     expect(clicks).toEqual([{ download: "agentbodycam-replay.svg", href: "blob:local/1" }]);
+    expect(revoked).toEqual([]);
+    vi.advanceTimersByTime(TEXT_REVOKE_DELAY_MS);
     expect(revoked).toEqual(["blob:local/1"]);
+    expect(vi.getTimerCount()).toBe(0);
+    vi.useRealTimers();
     expect(document.querySelector("a[download]")).toBeNull();
     const blob = blobs[0];
     if (blob === undefined) throw new Error("no blob");
@@ -89,9 +96,12 @@ describe("export dialog", () => {
     fireEvent.click(within(dialog).getByRole("button", { name: /JSON summary/ }));
     const pre = within(dialog).getByTestId("json-preview");
     expect(pre).toHaveTextContent('"format": "agentbodycam-share-summary"');
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     fireEvent.click(within(dialog).getByRole("button", { name: "Download JSON summary" }));
     expect(clicks).toEqual([{ download: "agentbodycam-summary.json", href: "blob:local/1" }]);
+    vi.advanceTimersByTime(TEXT_REVOKE_DELAY_MS);
     expect(revoked).toEqual(["blob:local/1"]);
+    vi.useRealTimers();
     const text = await blobs[0]?.text();
     expect(text).toBe(pre.textContent);
     const parsed = JSON.parse(text ?? "") as Record<string, unknown>;

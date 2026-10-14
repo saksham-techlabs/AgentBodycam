@@ -1,4 +1,11 @@
-import { useEffect, useMemo, useRef, useState, type KeyboardEvent as ReactKeyboardEvent } from "react";
+import {
+  useEffect,
+  useMemo,
+  useRef,
+  useState,
+  type KeyboardEvent as ReactKeyboardEvent,
+  type RefObject,
+} from "react";
 
 import { Chip } from "../components/Evidence";
 import type { Playback, SeekTarget } from "../hooks/usePlayback";
@@ -53,14 +60,20 @@ export function PlaybackBar(props: PlaybackBarProps) {
     step: (dir) => void playback.step(dir),
     important: goImportant,
   });
+  const ref = useRef<HTMLElement>(null);
+  useTheaterHeight(ref);
 
   const empty = playback.loaded === 0;
   const playLabel = playing ? "Pause" : ended ? "Replay" : "Play";
   const moment = current === null ? null : replayMoment(current, markersFor(markers, current));
+  const classes = ["playback", "replay-theater"];
+  if (playing) classes.push("is-playing");
+  if (playback.stalled) classes.push("has-alert");
 
   return (
     <section
-      className={playing ? "playback replay-theater is-playing" : "playback replay-theater"}
+      ref={ref}
+      className={classes.join(" ")}
       aria-label="Replay controls"
       data-testid="playback"
       data-state={statusOf(playback).state}
@@ -129,11 +142,13 @@ export function PlaybackBar(props: PlaybackBarProps) {
             </button>
           </span>
         </div>
-        <span className="playback-counter mono" data-testid="playback-counter">
-          <span className="counter-now">{current === null ? "—" : `#${formatCount(current.sequence)}`}</span>
-          <span className="counter-of"> / {formatCount(total)}</span>
+        <span className="playback-readout">
+          <span className="playback-counter mono" data-testid="playback-counter">
+            <span className="counter-now">{current === null ? "—" : `#${formatCount(current.sequence)}`}</span>
+            <span className="counter-of"> / {formatCount(total)}</span>
+          </span>
+          <StatusChip playback={playback} reducedMotion={reducedMotion} />
         </span>
-        <StatusChip playback={playback} reducedMotion={reducedMotion} />
         <div className="playback-options">
           <div className="segmented" role="group" aria-label="Playback speed">
             {PLAYBACK_SPEEDS.map((speed) => (
@@ -500,6 +515,38 @@ function CurrentEvent({
   );
 }
 
+// -- layout ----------------------------------------------------------------------------------
+
+export const THEATER_HEIGHT_VAR = "--replay-theater-height";
+
+/**
+ * Publishes the theater's rendered height on its container as `--replay-theater-height`,
+ * so the sticky layout sizes the timeline and the detail panel below the theater's real
+ * height (which grows with a temporary alert or wrapped controls) instead of a guess. One
+ * observer, no scroll listeners; without ResizeObserver the CSS fallback height applies.
+ */
+function useTheaterHeight(ref: RefObject<HTMLElement | null>): void {
+  useEffect(() => {
+    const el = ref.current;
+    const host = el?.parentElement;
+    if (el === null || host === null || host === undefined || typeof ResizeObserver === "undefined") {
+      return undefined;
+    }
+    let last = -1;
+    const observer = new ResizeObserver(() => {
+      const height = Math.ceil(el.getBoundingClientRect().height);
+      if (height <= 0 || height === last) return;
+      last = height;
+      host.style.setProperty(THEATER_HEIGHT_VAR, `${height}px`);
+    });
+    observer.observe(el);
+    return () => {
+      observer.disconnect();
+      host.style.removeProperty(THEATER_HEIGHT_VAR);
+    };
+  }, [ref]);
+}
+
 // -- keyboard --------------------------------------------------------------------------------
 
 /**
@@ -520,7 +567,8 @@ function usePlaybackShortcuts(actions: {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
       if (event.isComposing || isTextEntry(event.target)) return;
-      if (event.target instanceof Element && event.target.closest('[aria-modal="true"]') !== null) return;
+      // While a modal dialog is open nothing behind it reacts, wherever focus happens to be.
+      if (document.querySelector('[aria-modal="true"]') !== null) return;
       if (event.key === " ") {
         if (event.shiftKey || event.repeat || isOwnSpaceControl(event.target)) return;
         event.preventDefault();

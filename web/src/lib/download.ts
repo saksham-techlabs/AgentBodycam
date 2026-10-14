@@ -7,20 +7,21 @@ export const SVG_MIME = "image/svg+xml;charset=utf-8";
 export const JSON_MIME = "application/json;charset=utf-8";
 
 /**
- * How long a video's object URL outlives the download click. Small text files are read
- * before `click()` returns, but a multi-megabyte clip may still be read by the browser's
- * download manager afterwards, and some browsers abort the download if the URL is revoked
- * synchronously. The Blob stays inside this page either way; the delay only postpones
- * releasing it.
+ * How long an object URL outlives the download click. Browsers may read the Blob after
+ * `click()` returns (a multi-megabyte clip certainly is), and revoking synchronously can
+ * abort the download in some browsers. The Blob stays inside this page either way; the
+ * delay only postpones releasing it. Each revocation is a one-shot timer that holds
+ * nothing but the URL, so it deliberately outlives the dialog that started the download.
  */
+export const TEXT_REVOKE_DELAY_MS = 1_000;
 export const VIDEO_REVOKE_DELAY_MS = 2_000;
 
 /**
  * Saves `blob` as a local file through a temporary object URL. Nothing leaves the machine:
- * the Blob lives in this page, and the URL is revoked right after the click, or after
- * `revokeDelayMs` when given.
+ * the Blob lives in this page and the URL is always revoked, `revokeDelayMs` after the
+ * click, or at once if the click itself failed.
  */
-export function downloadBlob(filename: string, blob: Blob, revokeDelayMs = 0): void {
+export function downloadBlob(filename: string, blob: Blob, revokeDelayMs = TEXT_REVOKE_DELAY_MS): void {
   const url = URL.createObjectURL(blob);
   const link = document.createElement("a");
   link.href = url;
@@ -28,11 +29,13 @@ export function downloadBlob(filename: string, blob: Blob, revokeDelayMs = 0): v
   link.rel = "noopener";
   link.hidden = true;
   document.body.append(link);
+  let clicked = false;
   try {
     link.click();
+    clicked = true;
   } finally {
     link.remove();
-    if (revokeDelayMs > 0) setTimeout(() => URL.revokeObjectURL(url), revokeDelayMs);
+    if (clicked && revokeDelayMs > 0) setTimeout(() => URL.revokeObjectURL(url), revokeDelayMs);
     else URL.revokeObjectURL(url);
   }
 }

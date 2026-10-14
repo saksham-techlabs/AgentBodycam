@@ -1,6 +1,6 @@
 import { describe, expect, it } from "vitest";
 
-import { RICH_TIMELINE, item, longTimeline, richReport } from "../test/fixtures";
+import { RICH_TIMELINE, eventId, item, longTimeline, richReport } from "../test/fixtures";
 import {
   BASE_STEP_MS,
   DEFAULT_SPEED,
@@ -138,6 +138,21 @@ describe("scrubber markers", () => {
     const marks = scrubberMarkers(buildImportant(null, items), 5000);
     expect(marks.length).toBeLessThanOrEqual(MAX_SCRUBBER_MARKERS);
     expect(marks.length).toBeGreaterThan(100);
+  });
+
+  it("stay bounded at 30,000 events and never drop the first observable failure", () => {
+    const items = Array.from({ length: 30_000 }, (_, i) => item(i + 1, "check.failed", "x"));
+    const report = richReport("s");
+    report.first_observable_failure = {
+      ...report.first_observable_failure!,
+      event_id: eventId(15_001),
+      sequence: 15_001,
+    };
+    const started = performance.now();
+    const marks = scrubberMarkers(buildImportant(report, items), 30_000);
+    expect(performance.now() - started).toBeLessThan(1_000);
+    expect(marks.length).toBeLessThanOrEqual(MAX_SCRUBBER_MARKERS);
+    expect(marks).toContainEqual(expect.objectContaining({ sequence: 15_001, kind: "first_failure" }));
   });
 });
 

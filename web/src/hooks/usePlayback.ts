@@ -263,18 +263,20 @@ export function usePlayback({
   }, []);
 
   // Follow live: only when enabled, paused and sitting on the newest event when new
-  // events arrive; playback itself never races the live poller.
+  // events arrive; playback itself never races the live poller. Following can only be
+  // switched on while live, and it still applies to the final read after the recording
+  // stopped, so a follower ends on the recording's last event.
   const { items, hasMore, pages, total: serverTotal } = timeline.data;
   const previousLength = useRef(items.length);
   useEffect(() => {
     const before = previousLength.current;
     previousLength.current = items.length;
-    if (!state.followLive || !live || playingRef.current || items.length <= before) return;
+    if (!state.followLive || playingRef.current || items.length <= before) return;
     const newest = items[items.length - 1];
     if (positionRef.current === before - 1 && newest !== undefined) {
       moveTo(newest, items.length - 1, "follow");
     }
-  }, [items, live, state.followLive, moveTo]);
+  }, [items, state.followLive, moveTo]);
 
   const loaded = items.length;
   const total = Math.max(serverTotal, loaded, lastSequence(timeline.data));

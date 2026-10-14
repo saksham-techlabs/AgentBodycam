@@ -23,6 +23,7 @@ export function hostileReport(): ForensicReport {
     r.latest_git_state.summary = "Git: feature/secret-branch @ deadbee";
   }
   r.warnings.items.push({ code: "x", severity: "info", message: `Bearer ${TOKEN}`, event_ids: [] });
+  r.warnings.total = r.warnings.items.length;
   return r;
 }
 

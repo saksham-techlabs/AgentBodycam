@@ -48,7 +48,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   STATE"). The SVG is produced from an explicit element tree (presentational elements
   only, allowlisted attribute names, every text node and value XML-escaped, only local
   `url(#…)` gradient references, system fonts); the same tree renders the preview.
-  Downloads use a local Blob and object URL that is revoked right after the click. No
+  Downloads use a local Blob and object URL that is revoked 1 s after the click. No
   network request, clipboard write, dependency or CSP change. PNG export is not offered:
   rasterizing in the page would require loosening the UI's `img-src 'self'` policy.
   Playback keyboard shortcuts are ignored while focus is inside the dialog. Still not
@@ -275,6 +275,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Replay UI reliability hardening (no new features; forensic semantics, API and privacy
+  rules unchanged):
+  - WebM export: a second click on Export WebM in a narrow dialog could land on Cancel,
+    because Cancel was inserted where Export WebM had been; the run was cancelled and the
+    panel went back to Ready. Cancel now has a fixed slot before Export WebM, the buttons
+    no longer move, and Cancel returns focus to Export WebM. Every export has a run ID;
+    progress, results and errors of a cancelled, closed or superseded run are ignored, so
+    a late callback can never overwrite a newer export. A frame-drawing exception now
+    ends the export as an error with full cleanup instead of leaving the stream running;
+    a failing save step is reported. A backdrop click (or a drag that ends on the
+    backdrop) no longer closes the dialog during an export, and Tab stays inside the
+    dialog even when focus sits on the dialog itself.
+  - Downloads: SVG and JSON object URLs are revoked 1 s after the click (2 s for WebM)
+    instead of synchronously, which could cut off a download in some browsers; a failed
+    click revokes immediately.
+  - Sticky theater: the timeline and detail-panel heights now follow the theater's
+    measured height (one `ResizeObserver`), so a playback alert or wrapped controls no
+    longer push rows under the theater (previously up to about 40 px at 1024 × 720). The
+    control row wraps by the theater's own width; the counter and status stay together.
+  - Live sessions: polling continues through transient failures (unreachable or
+    restarted server) and retries a failed timeline request, so the view recovers
+    without a reload. "Follow live" now also follows the final read after the recording
+    stops. An empty live poll no longer copies the event index or re-renders the
+    timeline.
+  - Fatal errors (session gone, access expired after the one re-bootstrap, access
+    refused, server error) stop polling and clear the replay: playback paused, jumps
+    cancelled, selection cleared and the export dialog closed.
+  - Playback keyboard shortcuts are ignored whenever a modal dialog is open; reduced
+    motion also works on engines that only implement the legacy `addListener` API.
 - Automatic check classification no longer turns informational or discovery-only runs of
   recognised tools (`pytest --version`, `mypy --help`, `ruff check --help`,
   `pytest --collect-only`, `cargo test --no-run`, `go test -list X`,

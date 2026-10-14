@@ -17,6 +17,7 @@ const CHUNK_MS = 1_000;
 export const ENCODE_TIMEOUT_MS = 10_000;
 
 export const UNSUPPORTED_MESSAGE = "Replay clip export is not supported in this browser.";
+export const SAVE_FAILED_MESSAGE = "The clip was created but could not be saved. No file was saved.";
 
 export type ClipCodec = "VP9" | "VP8" | "WebM";
 export type ClipSupport = { supported: true; mimeType: string; codec: ClipCodec } | { supported: false; reason: string };
@@ -182,10 +183,17 @@ export function recordReplayClip(timeline: ReplayClipTimeline, options: RecordOp
 
     const tick = (): void => {
       timer = undefined;
+      if (settled) return;
       const elapsed = performance.now() - start;
       const frame = Math.min(timeline.totalFrames - 1, Math.floor(elapsed / frameMs));
       if (frame !== drawn) {
-        drawClipFrame(draw, timeline, frame);
+        try {
+          drawClipFrame(draw, timeline, frame);
+        } catch {
+          // A throwing frame would otherwise leave the promise, recorder and tracks pending.
+          settle({ error: fail("recorder") });
+          return;
+        }
         drawn = frame;
       }
       const next = Math.min(100, Math.floor(((frame + 1) / timeline.totalFrames) * 100));

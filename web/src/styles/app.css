@@ -41,9 +41,6 @@
   --motion-fast: 140ms;
   --motion-base: 200ms;
   --ease-out: cubic-bezier(0.2, 0.7, 0.2, 1);
-  /* Timeline height while the theater is sticky: it fits below the theater at any scroll. */
-  --replay-timeline-height: clamp(320px, calc(100vh - 440px), 860px);
-
   color-scheme: dark;
 }
 
@@ -1063,6 +1060,14 @@ button.session-row:hover:not(:disabled) {
 /* ---- playback ---------------------------------------------------------------------- */
 
 .replay {
+  /*
+   * Space below the sticky theater. `--replay-theater-height` is the theater's measured
+   * height, set on this element by the Replay UI, so an alert or wrapped controls never
+   * push rows under it; the fallback is its usual height without an alert. The timeline
+   * keeps 80px for the gap, its footer and the page's bottom padding.
+   */
+  --replay-below-theater: calc(100vh - var(--topbar-height) - var(--replay-theater-height, 304px));
+  --replay-timeline-height: clamp(224px, calc(var(--replay-below-theater) - 80px), 860px);
   display: flex;
   flex-direction: column;
   gap: 14px;
@@ -1264,6 +1269,14 @@ button.session-row:hover:not(:disabled) {
   border: 0;
   border-left: 3px solid currentColor;
   border-right: 3px solid currentColor;
+}
+
+/* Position and status wrap together, never one without the other. */
+.playback-readout {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  white-space: nowrap;
 }
 
 .playback-counter {
@@ -3009,10 +3022,26 @@ button.session-row:hover:not(:disabled) {
   }
 }
 
+/*
+ * A theater too narrow for one control row (including a live session's Follow live and the
+ * longest status): transport buttons on the first row, position, status and speed together
+ * on the second, instead of the speed control wrapping on its own. Measured on the theater
+ * itself, so the sidebar and page padding need no guessing.
+ */
+.replay-theater {
+  container-type: inline-size;
+}
+
+@container (min-width: 600px) and (max-width: 999px) {
+  .playback-buttons {
+    flex: 1 0 100%;
+  }
+}
+
 /* Detail panel below the timeline: short enough to stay clear of the theater. */
 @media (min-width: 900px) and (max-width: 1100px) and (min-height: 720px) {
   .replay .detail {
-    max-height: max(240px, calc(100vh - 400px));
+    max-height: max(240px, calc(var(--replay-below-theater) - 40px));
   }
 }
 
@@ -3360,7 +3389,18 @@ button.session-row:hover:not(:disabled) {
 
 .export-clip-actions {
   display: flex;
+  justify-content: flex-end;
   gap: 8px;
+}
+
+/* Reserved space: the progress bar and the Cancel button appear without moving anything. */
+.export-clip-progress.is-idle,
+.export-dialog .button.is-placeholder {
+  visibility: hidden;
+}
+
+.export-dialog:focus {
+  outline: none;
 }
 
 .export-dialog .button[aria-disabled="true"] {

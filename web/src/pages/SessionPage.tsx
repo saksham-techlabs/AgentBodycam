@@ -42,12 +42,27 @@ const TABS: readonly { id: TabId; label: string }[] = [
 
 const IDLE: JumpState = { status: "idle" };
 
-/** Errors after which stale data must not stay on screen: the session itself is gone. */
-function isFatal(error: unknown): boolean {
-  return (
-    error instanceof ApiError &&
-    (error.kind === "not_found" || error.kind === "bad_request" || error.kind === "server")
-  );
+const FATAL_KINDS: ReadonlySet<ApiError["kind"]> = new Set([
+  "not_found",
+  "bad_request",
+  "server",
+  "unauthorized",
+  "forbidden",
+]);
+
+/**
+ * The error after which stale data must not stay on screen, if any: the session is gone or
+ * unreadable, or this page lost access to the server (a token rejected even after a fresh
+ * bootstrap, or a refused request). A 404 from the report or the timeline means the session
+ * disappeared too. Unreachable servers and malformed replies are not fatal: the data on
+ * screen stays valid and the next refresh can recover.
+ */
+function fatalError(detail: unknown, report: unknown, timeline: unknown): ApiError | null {
+  if (detail instanceof ApiError && FATAL_KINDS.has(detail.kind)) return detail;
+  for (const error of [report, timeline]) {
+    if (error instanceof ApiError && error.kind === "not_found") return error;
+  }
+  return null;
 }
 
 export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: () => void }) {
@@ -82,7 +97,10 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
     () => Promise.all([reloadDetail(), reloadReport(), pollTimeline()]).then(() => undefined),
     [reloadDetail, reloadReport, pollTimeline],
   );
-  usePolling(refreshAll, live && detail.error === null);
+  const fatal = fatalError(detail.error, report.error, timeline.error);
+  // A live session keeps refreshing through transient failures (an unreachable or
+  // restarting server), so it recovers on its own; only a fatal error stops it.
+  usePolling(refreshAll, live && fatal === null);
 
   // A recording that just stopped gets one last report and timeline read, so its final
   // events and findings are shown even if they landed after the last live poll.
@@ -176,6 +194,18 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
     setJump(IDLE);
   }, []);
 
+  // After a fatal error nothing keeps running behind the error state: no playback steps or
+  // page requests, no pending jump, no export of data that is no longer shown.
+  const failed = fatal !== null;
+  useEffect(() => {
+    if (!failed) return;
+    playbackRef.current.pause();
+    latest.current.timeline.cancelLoadUntil();
+    setJump(IDLE);
+    setSelectedId(null);
+    setExportOpen(false);
+  }, [failed]);
+
   const chooseTab = (id: TabId): void => {
     if (id !== "timeline") playback.pause();
     setTab(id);
@@ -187,8 +217,6 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
       Back to sessions
     </button>
   );
-  const fatal = detail.error !== null && isFatal(detail.error);
-
   return (
     <>
       <TopBar
@@ -210,7 +238,7 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
           </nav>
         }
         meta={
-          data === null || fatal ? null : (
+          data === null || fatal !== null ? null : (
             <>
               <StatusBadge state={visualState(data.recording_state)} />
               <span className="topbar-note mono">{plural(data.event_count, "event")}</span>
@@ -238,14 +266,14 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
         }
         onRefresh={() => void refreshAll()}
         refreshing={detail.refreshing || report.refreshing}
-        updatedAt={fatal ? null : detail.updatedAt}
-        autoRefresh={live && detail.error === null}
+        updatedAt={fatal === null ? detail.updatedAt : null}
+        autoRefresh={live && fatal === null}
       />
       <div className="page page-wide">
         {detail.loading ? (
           <LoadingState label="Loading session…" rows={3} />
-        ) : data === null || fatal ? (
-          <ErrorState error={detail.error} action={backButton} />
+        ) : data === null || fatal !== null ? (
+          <ErrorState error={fatal ?? detail.error} action={backButton} />
         ) : (
           <>
             {detail.error === null ? null : <ErrorBanner error={detail.error} />}
@@ -307,7 +335,7 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
           </>
         )}
       </div>
-      {exportOpen && report.data !== null && !fatal ? (
+      {exportOpen && report.data !== null && fatal === null ? (
         <ExportDialog report={report.data} onClose={closeExport} />
       ) : null}
     </>
