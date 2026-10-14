@@ -13,9 +13,10 @@
 > local Replay UI under development (`agentbodycam replay`: dashboard, session overview,
 > paginated forensic timeline with failure / recovery / unresolved markers, replay
 > playback controls and a scrubber, findings, observed files and the last recorded Git /
-> final state, presented as a cinematic replay view). It does not observe arbitrary
-> terminal commands and does not integrate with any specific agent. File contents and
-> diffs, share/export and an AI analyst do not exist yet. Expect breaking changes.
+> final state, presented as a cinematic replay view, plus a local privacy-safe export:
+> an SVG share card and a JSON summary). It does not observe arbitrary terminal commands
+> and does not integrate with any specific agent. File contents and diffs, GIF/video
+> export, hosted sharing and an AI analyst do not exist yet. Expect breaking changes.
 >
 > Implemented:
 > - file recording
@@ -32,11 +33,14 @@
 > - Replay visual styling: a sticky "replay theater" (controls, scrubber, current event)
 >   with evidence-driven emphasis for the first observable failure, observed recoveries
 >   and unresolved failures
+> - local privacy-safe SVG share card (generated in the browser, nothing uploaded)
+> - privacy-safe JSON summary export
 >
 > Still not implemented:
 > - possible final micro-polish of the replay view
 > - file contents and diffs
-> - share/export (cards, GIF, video)
+> - GIF/video export
+> - hosted sharing (exports are local files only)
 > - agent-specific adapters
 > - optional AI analyst
 
@@ -77,8 +81,8 @@ It is designed to be:
 | Capture of commands run outside `agentbodycam run` | Not planned for universal mode |
 | Local forensics engine (`analyze`) | Implemented (deterministic, read-only, observed findings only) |
 | Local Replay API (`replay-api`) | Implemented (loopback only, temporary bearer token, read-only, standard library only) |
-| Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, replay playback controls and scrubber in a sticky replay view, findings, observed files, last recorded Git/final state; no export |
-| Share/export | Not started |
+| Replay UI (`replay`) | Under development: dashboard, overview, paginated timeline with failure/recovery markers, replay playback controls and scrubber in a sticky replay view, findings, observed files, last recorded Git/final state, local privacy-safe export |
+| Share/export | Local SVG share card and JSON summary (privacy-safe, generated in the browser); no GIF/video, no hosted sharing |
 | Agent-specific integrations (Cursor, Codex, Claude Code, ...) | None exist |
 | Optional AI analysis | Not started |
 
@@ -178,7 +182,7 @@ What this is, and is not:
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
-- Not yet: agent integrations, export or AI.
+- Not yet: agent integrations, GIF/video export or AI.
 
 ### Recording commands you run
 
@@ -368,7 +372,7 @@ AgentBodycam Replay (UI preview)
 Project: C:\work\app
 Listening: http://127.0.0.1:54321
 Open in your browser: http://127.0.0.1:54321/
-The Replay UI is under development: playback controls exist; export does not.
+The Replay UI is under development: playback and local privacy-safe export (SVG card, JSON summary) exist; GIF/video export does not.
 Access is granted automatically to the page served at this address; the address contains no secret and nothing is stored in your browser.
 Read-only, loopback only.
 Press Ctrl+C to stop.
@@ -416,13 +420,28 @@ run time). Today it shows:
   commands, errors observed and evidence notes; every reference can jump to its event;
 - a **Files** tab: the paths observed during this recording and their change counts;
 - a **Git / Final State** tab: the last recorded Git state, the final state of each
-  check and the command summary.
+  check and the command summary;
+- an **Export** button (top bar) that opens a local export panel with a preview:
+  - **Share card**: a 1200 × 630 SVG (`agentbodycam-replay.svg`) with the event count,
+    files changed, failed checks, observed recoveries, unresolved failures, the first
+    observable failure and the first observed recovery (event number and a label such as
+    `Test failed: pytest`) and the final (or, while live, latest) recorded check state;
+  - **JSON summary**: the same facts as `agentbodycam-summary.json`
+    (`"format": "agentbodycam-share-summary"`, `"version": 1`), not the raw report.
+
+  Both are generated in your browser from an allowlist of safe fields and saved as local
+  files; nothing is uploaded and nothing is copied to the clipboard. They never contain
+  the project name or path, session ID, event IDs, timestamps, file paths, command lines,
+  Git branch / commit / remote, environment, file contents, hashes, tokens or free-text
+  summaries. Check names appear only when they are one of AgentBodycam's generated tool
+  names (`pytest`, `npm test`, ...), otherwise a generic label is used. The SVG uses
+  system fonts and no scripts, links, external images or remote resources.
 
 All findings are observed facts from the recording: the UI never attributes a failure or
 a recovery to a file change. While a session is live the report and timeline refresh
 every 2.5 s (never overlapping, paused while the browser tab is hidden); playback pauses
-too while the tab is hidden. File contents and diffs, GIF/video export and sharing are
-**not implemented yet**.
+too while the tab is hidden. File contents and diffs, GIF/video export and hosted sharing
+are **not implemented yet**.
 
 How the page gets API access: the page asks its own server for the temporary token with a
 same-origin `fetch()` (`GET /ui/bootstrap`, which requires a custom header and browser

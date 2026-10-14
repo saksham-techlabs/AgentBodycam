@@ -3113,8 +3113,178 @@ button.session-row:hover:not(:disabled) {
   .play-button,
   .theater-mark,
   .status-dot,
-  .busy-dot {
+  .busy-dot,
+  .export-format {
     transition: none;
     animation: none;
+  }
+}
+
+/* -- export ------------------------------------------------------------------------------ */
+
+.export-backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 50;
+  display: grid;
+  place-items: center;
+  padding: 24px;
+  background: rgba(3, 5, 9, 0.78);
+  backdrop-filter: blur(3px);
+}
+
+.export-dialog {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+  width: min(880px, 100%);
+  max-height: calc(100vh - 48px);
+  overflow: auto;
+  padding: 20px 22px;
+  border: 1px solid var(--border-strong);
+  border-radius: 14px;
+  background: var(--replay-surface);
+  box-shadow: 0 30px 60px -24px rgba(0, 0, 0, 0.95), inset 0 1px 0 rgba(255, 255, 255, 0.03);
+}
+
+.export-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.export-title {
+  margin: 0;
+  font-size: 18px;
+  font-weight: 600;
+}
+
+.export-formats {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.export-format {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 3px;
+  padding: 10px 14px;
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--panel);
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  font-weight: 600;
+  text-align: left;
+  cursor: pointer;
+  transition: border-color var(--motion-fast) var(--ease-out), background var(--motion-fast) var(--ease-out);
+}
+
+.export-format:hover {
+  background: var(--panel-hover);
+}
+
+.export-format.is-active {
+  border-color: var(--replay-edge);
+  background: color-mix(in srgb, var(--blue) var(--accent-soft), var(--panel));
+  box-shadow: inset 0 0 0 1px rgba(90, 167, 255, 0.18);
+}
+
+.export-format:focus-visible,
+.export-dialog .button:focus-visible,
+.export-json:focus-visible {
+  outline: 2px solid var(--blue);
+  outline-offset: 2px;
+}
+
+.export-format-note {
+  font-family: var(--mono);
+  font-size: 11px;
+  font-weight: 400;
+  color: var(--text-3);
+}
+
+.export-note {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  padding: 10px 14px;
+  border: 1px solid color-mix(in srgb, var(--green) 28%, transparent);
+  border-radius: var(--radius-sm);
+  background: color-mix(in srgb, var(--green) 6%, transparent);
+  font-size: 13px;
+}
+
+.export-note .badge-dot {
+  margin-top: 6px;
+}
+
+.export-note p {
+  margin: 2px 0 0;
+  color: var(--text-2);
+}
+
+.export-preview {
+  margin: 0;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+}
+
+.share-card {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+.export-json {
+  max-height: 360px;
+  margin: 0;
+  overflow: auto;
+  padding: 14px 16px;
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  background: var(--bg);
+  color: #bcd8ff;
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.export-actions {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.export-local {
+  margin: 0;
+  font-size: 12px;
+  color: var(--text-3);
+}
+
+.button-primary {
+  border-color: color-mix(in srgb, var(--blue) 55%, transparent);
+  background: color-mix(in srgb, var(--blue) 18%, var(--panel));
+  color: #e8f2ff;
+}
+
+.button-primary:hover:not(:disabled) {
+  border-color: var(--blue);
+  background: color-mix(in srgb, var(--blue) 26%, var(--panel));
+}
+
+@media (max-width: 640px) {
+  .export-formats {
+    grid-template-columns: 1fr;
+  }
+  .export-actions {
+    flex-direction: column;
+    align-items: stretch;
   }
 }

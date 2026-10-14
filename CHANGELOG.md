@@ -9,6 +9,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Local privacy-safe replay exports in the Replay UI. An **Export** button in the session
+  top bar opens a small accessible panel (labelled dialog, focus moved in and returned to
+  the button, Tab kept inside, Escape / Close to dismiss) with two formats and a preview:
+  a 1200 × 630 **SVG share card** (`agentbodycam-replay.svg`) and a **JSON summary**
+  (`agentbodycam-summary.json`, `"format": "agentbodycam-share-summary"`, `"version": 1`).
+  Both are built in the browser from a dedicated `ShareCardModel` that copies only
+  approved report fields: counts (events, files changed, failed / passed checks,
+  observable failures, observed recoveries, unresolved failures), the sequence number of
+  the first observable failure and of the first observed recovery, the recording state
+  and the final check results. Labels are rebuilt from structured fields (`Test failed:
+  pytest`, `Command could not start`); free-text summaries are never used, and check
+  names that are not plain generated tool names are replaced by a generic label. Exports
+  never contain the project name or path, session ID, event IDs, timestamps, file paths,
+  argv, Git branch / SHA / remote, environment, file contents, hashes, tokens or raw
+  payloads. A live session is worded as a snapshot ("LIVE · SO FAR", "LATEST RECORDED
+  STATE"). The SVG is produced from an explicit element tree (presentational elements
+  only, allowlisted attribute names, every text node and value XML-escaped, only local
+  `url(#…)` gradient references, system fonts); the same tree renders the preview.
+  Downloads use a local Blob and object URL that is revoked right after the click. No
+  network request, clipboard write, dependency or CSP change. PNG export is not offered:
+  rasterizing in the page would require loosening the UI's `img-src 'self'` policy.
+  Playback keyboard shortcuts are ignored while focus is inside the dialog. Still not
+  implemented: GIF/video export, hosted sharing, file contents/diffs, agent-specific
+  adapters and an optional AI analyst.
 - Replay UI visual styling (still under development; presentation only, no change to
   playback logic, timing, pagination, the API or event schemas). The Timeline tab's
   controls, status, scrubber, marker rail and current event now form one "replay

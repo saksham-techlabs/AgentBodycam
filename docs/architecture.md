@@ -14,9 +14,10 @@
 > (`agentbodycam replay`, section 3.6: app shell, connection status, session dashboard,
 > overview, paginated forensic timeline with first-failure / recovery / unresolved
 > markers, replay playback controls and scrubber, findings, observed files and last
-> recorded Git / final state, with the replay styled as a sticky "replay theater").
-> Capture of commands not launched through `agentbodycam run`, adapters, file contents
-> and diffs, export and AI are not implemented.
+> recorded Git / final state, with the replay styled as a sticky "replay theater"), with a
+> local privacy-safe export (SVG share card and JSON summary, section 3.7). Capture of
+> commands not launched through `agentbodycam run`, adapters, file contents and diffs,
+> GIF/video export, hosted sharing and AI are not implemented.
 > This document describes the intended direction so future work stays coherent.
 
 ## 1. Goals and principles
@@ -1173,8 +1174,11 @@ timing model, pagination, API and event schemas are unchanged.
   hero body per event. With `prefers-reduced-motion: reduce` the hero fade and pulse are
   not applied (JS) and all transitions and animations are off (CSS).
 
+**Export** (see section 3.7): an Export button in the session top bar opens a local
+export panel (SVG share card, JSON summary).
+
 **Not implemented yet.** Possible final micro-polish (10C.2B), file contents and diff
-viewer, export and sharing (cards, GIF, video).
+viewer, GIF/video export and hosted sharing.
 
 **API client** (`web/src/api/`). GET only, `cache: "no-store"`, `credentials:
 "same-origin"`, `redirect: "error"`, `referrerPolicy: "no-referrer"`, an `AbortSignal` per
@@ -1247,15 +1251,69 @@ Testing Library (`npm run test`) against a fake server that mirrors the real rou
 `tests/test_replay_ui.py` for serving, headers, path safety, bootstrap, the CLI and
 wheel packaging.
 
-Still to come: possible final micro-polish of the replay view, file/diff views, export,
-and clearly different styling of facts and inferences (section 2).
+Still to come: possible final micro-polish of the replay view, file/diff views, GIF/video
+export, and clearly different styling of facts and inferences (section 2).
 
 ### 3.7 Share / export pipeline
 
-- Export sessions or excerpts as shareable artifacts: static report, clips/cards, and
-  later animated or video replays.
-- Redaction step before any export (paths, secrets, file contents the user excludes).
-- Exports are generated locally; sharing is an explicit user action.
+**Implemented (local, in the Replay UI):** a privacy-safe SVG share card and a
+privacy-safe JSON summary. Everything runs in the browser from the already-loaded
+forensic report; no request is made, nothing is uploaded, nothing is written to the
+clipboard, and no dependency or CSP change was needed.
+
+```text
+ForensicReport ──buildShareModel()──▶ ShareCardModel ──buildShareCard()──▶ SvgNode tree
+ (web/src/lib/shareModel.ts)          (approved fields)  (lib/shareCard.ts)     │
+                                            │                     ┌─────────────┴─────────────┐
+                                            ▼                     ▼                           ▼
+                                   buildShareSummary()     <SvgTree> preview          serializeSvg()
+                                   → JSON summary          (components/SvgTree.tsx)   (lib/svg.ts)
+                                                                                      → .svg download
+```
+
+- **Safe model.** `buildShareModel()` is the only code that reads the report. It copies
+  named fields only: recording state, analysis completeness, counts (events, unique
+  changed paths, file change events, failed / passed checks, observable failures,
+  recoveries, unresolved failures), the sequence number of the first observable failure
+  and of the earliest observed recovery, and the final check results (kind, name, result;
+  at most 12). Rendering code receives only this model, never the report.
+- **Sanitization by allowlist.** Free-text summaries, reasons, paths, command IDs, event
+  IDs, check signatures, timestamps, Git state, warnings and errors are never copied.
+  Labels are rebuilt from structured fields: `check_failed` becomes
+  `<Kind> failed: <name>` (`Test failed: pytest`); spawn errors, signals and interrupts
+  become fixed texts without the executable. Kinds must be one of
+  `test|build|lint|typecheck`; names must be one or two lowercase words of
+  `[a-z0-9_+-]` (≤ 24 characters, no dots, slashes, colons, uppercase, long hex or digit
+  runs), else a generic label is used. Labels are bounded to 34 characters, counts to
+  999,999.
+- **Wording.** A stopped session shows FINAL RECORDED STATE; a live one shows
+  "LIVE · SO FAR" and LATEST RECORDED STATE. The verdict is PASS only when every recorded
+  final check passed and the list is complete, FAIL when any latest result failed or an
+  unresolved failure exists, PARTIAL when the list is truncated, otherwise "No checks".
+  No causal and no screen-video wording; the footer says "Recorded locally · No source
+  code uploaded" and "Recorded with AgentBodycam".
+- **SVG.** 1200 × 630, built as an explicit element tree whose tag type admits only
+  presentational elements (`svg title desc defs linearGradient radialGradient stop g
+  rect circle line path text tspan`). Attribute names must match `^[a-zA-Z][a-zA-Z0-9-]*$`
+  and may not be `on*`, `href`, `style` or `src`; `url(...)` values must be local
+  `url(#id)` references. Every text node and attribute value is XML-escaped. System font
+  stacks only. Deterministic: the same model yields byte-identical output. The in-app
+  preview renders the same tree through React, so preview and download match.
+- **JSON summary.** `{"format": "agentbodycam-share-summary", "version": 1, ...}` with a
+  fixed key list (`SUMMARY_KEYS`): `recording_state`, `analysis_complete`, `events`,
+  `file_changes`, `file_change_events`, `failed_checks`, `passed_checks`,
+  `observable_failures`, `observed_recoveries`, `unresolved_failures`,
+  `first_observable_failure` / `first_observed_recovery` (`{event, label}` or null),
+  `final_check_verdict`, `final_checks` (`{kind, name, result}`), `final_checks_total`,
+  `final_checks_passing`, `final_checks_failing`. It is not the raw report.
+- **Download.** Fixed file names `agentbodycam-replay.svg` and
+  `agentbodycam-summary.json`; a Blob, a temporary object URL and a hidden `<a download>`
+  that is removed and whose URL is revoked immediately after the click.
+- **PNG** is not offered: drawing the SVG into a canvas would need a `blob:` or `data:`
+  image source, which the UI's `img-src 'self'` deliberately forbids.
+
+**Planned, not implemented:** GIF/video replays, excerpts, user-configurable redaction,
+and any hosted sharing (sharing stays an explicit user action with a local file).
 
 ### 3.8 Optional AI Analyst
 

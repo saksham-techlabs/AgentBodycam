@@ -520,6 +520,7 @@ function usePlaybackShortcuts(actions: {
     const onKeyDown = (event: KeyboardEvent): void => {
       if (event.defaultPrevented || event.ctrlKey || event.metaKey || event.altKey) return;
       if (event.isComposing || isTextEntry(event.target)) return;
+      if (event.target instanceof Element && event.target.closest('[aria-modal="true"]') !== null) return;
       if (event.key === " ") {
         if (event.shiftKey || event.repeat || isOwnSpaceControl(event.target)) return;
         event.preventDefault();

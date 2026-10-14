@@ -22,6 +22,7 @@ import {
   normalizeQuery,
   type TimelineFilter,
 } from "../lib/timeline";
+import { ExportDialog } from "../views/ExportDialog";
 import { FilesView } from "../views/FilesView";
 import { FindingsView } from "../views/FindingsView";
 import { GitStateView } from "../views/GitStateView";
@@ -64,6 +65,12 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [focusRequest, setFocusRequest] = useState<FocusRequest | null>(null);
   const [jump, setJump] = useState<JumpState>(IDLE);
+  const [exportOpen, setExportOpen] = useState(false);
+  const exportButton = useRef<HTMLButtonElement>(null);
+  const closeExport = useCallback(() => {
+    setExportOpen(false);
+    exportButton.current?.focus();
+  }, []);
 
   const data = detail.data;
   const live = data?.recording_state === "recording";
@@ -207,6 +214,25 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
             <>
               <StatusBadge state={visualState(data.recording_state)} />
               <span className="topbar-note mono">{plural(data.event_count, "event")}</span>
+              <button
+                ref={exportButton}
+                type="button"
+                className="button"
+                onClick={() => {
+                  playback.pause();
+                  setExportOpen(true);
+                }}
+                disabled={report.data === null}
+                aria-haspopup="dialog"
+                title={report.data === null ? "Available once the report has loaded" : undefined}
+              >
+                <svg className="icon" viewBox="0 0 16 16" aria-hidden="true" focusable="false">
+                  <path d="M8 2.5v7" />
+                  <path d="M5 6.5l3 3 3-3" />
+                  <path d="M3 11.5v2h10v-2" />
+                </svg>
+                Export
+              </button>
             </>
           )
         }
@@ -281,6 +307,9 @@ export function SessionPage({ sessionId, onBack }: { sessionId: string; onBack: 
           </>
         )}
       </div>
+      {exportOpen && report.data !== null && !fatal ? (
+        <ExportDialog report={report.data} onClose={closeExport} />
+      ) : null}
     </>
   );
 }
