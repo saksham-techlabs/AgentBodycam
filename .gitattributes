@@ -2,5 +2,9 @@
 *.bat text eol=crlf
 *.cmd text eol=crlf
 *.ps1 text eol=crlf
+# Force text+LF: mixed/bare-CR HTML was previously auto-detected as binary and
+# committed with Windows EOLs, breaking Ubuntu frontend reproducibility checks.
+*.html text eol=lf
+*.svg text eol=lf
 src/agentbodycam/ui/static/** linguist-generated=true
 web/package-lock.json linguist-generated=true
