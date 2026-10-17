@@ -333,13 +333,15 @@ child always receives the original argv):
   Google `AIza...`, Stripe, npm tokens, JWTs, any 32+ character run of token characters
   mixing upper case, lower case and digits, and whole items containing a private-key block.
   Lower-case hex (Git SHAs) is kept.
-- Paths: an absolute path (or `~...`), alone or as the value of `name=`, becomes its
-  normalized project-relative POSIX form (`.` for the root) if inside the project, otherwise
-  `<external-path>`. The project and home directories embedded elsewhere in an item become
-  `<project>` / `<home>`. `executable` is only the program's file name. Drive paths
-  (`C:\...`) and UNC paths (`\\server\...`) are absolute on every platform; on Windows a
-  driveless rooted path with at least two segments (`/home/me/x`, `\Users\me\x`) is too,
-  while single-segment switches such as `/c` or `/p:Name=value` are kept.
+- Paths: an absolute path (or `~...`), alone or as the value of `name=`, becomes
+  `<project>` (project root) or `<project>/rel` if inside the project — the `<project>/`
+  prefix is a privacy-safe provenance marker so a rewritten absolute path cannot collapse
+  with an argument that was typed relative — otherwise `<external-path>`. The project and
+  home directories embedded elsewhere in an item become `<project>` / `<home>`.
+  `executable` is only the program's file name. Drive paths (`C:\...`) and UNC paths
+  (`\\server\...`) are absolute on every platform; on Windows a driveless rooted path with
+  at least two segments (`/home/me/x`, `\Users\me\x`) is too, while single-segment
+  switches such as `/c` or `/p:Name=value` are kept.
 - Bounds: at most 64 items, 256 characters per item, 4096 characters in total; redaction
   happens before truncation. `argv_redacted`, `argv_truncated` and `argv_paths_rewritten`
   record what happened; `argument_count` is the real number of arguments.
@@ -408,12 +410,15 @@ executing the check:
 | `go build` (`-x` or `--x`) | `-h`, `-help`, `-n` |
 | `dotnet test` | `-h`, `--help`, `-?`, `/?`, `--list-tests`, `-t` |
 | `dotnet build` | `-h`, `--help`, `-?`, `/?` |
-| npm / pnpm / yarn scripts | `-h`, `--help`, `-?`, `-v`, `-V`, `--version` after the script name (the underlying tool is unknown) |
+| npm / pnpm / yarn scripts | `-h`, `--help`, `-?`, `-v`, `-V`, `--version`, `--if-present` after the script name (the underlying tool is unknown; `--if-present` allows a missing script to exit 0 without running) |
 
 The reason is a forensic invariant: `pytest --version` or `mypy --version` exiting 0 says
 nothing about the project's tests or types, so it must never become a `check.passed` that
 a future forensic engine could read as "the test suite passed" or "type checking passed".
-Matching is exact per argument; a flag's *value* (`pytest -k version`) is not a flag.
+Likewise `npm run build --if-present` (and the equivalent `pnpm` / `yarn` forms) must not
+become an automatic passed build when no build script exists. Explicit `--check KIND`
+still classifies such an invocation if the user insisted; automatic classification does
+not. Matching is exact per argument; a flag's *value* (`pytest -k version`) is not a flag.
 
 **Explicit shell wrappers** are looked through, for classification only (argv passed to
 the child is never changed, and no shell is ever added): `cmd [/d] [/q] [/s] /c <command>`
@@ -574,17 +579,23 @@ for `status`, 256 KiB otherwise):
 | Every Git poll | `git status --porcelain=v2 --branch -z --untracked-files=all --ignore-submodules=all --renames -- . ":(exclude).agentbodycam"` |
 | Only when HEAD moved | `git merge-base --is-ancestor A B` (once or twice) and `git log -z --no-show-signature --format=%H%x1f%s --max-count=21 NEW [^OLD] --` |
 
-Every command gets `-c core.fsmonitor=false -c color.ui=never` and runs with
-`GIT_OPTIONAL_LOCKS=0` (status never takes `index.lock` or rewrites the index),
-`GIT_TERMINAL_PROMPT=0`, `LC_ALL=C`, and with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`,
-`GIT_OBJECT_DIRECTORY`, `GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_TRACE*` and similar
-redirections removed. The executable is the first `git` (`git.exe` on Windows) in an
-**absolute** `PATH` entry; the current directory is never searched. On Windows Git runs
-without a console and in its own process group (POSIX: its own session), so Ctrl+C aimed at
-the recorder never interrupts it; a forced stop kills a running Git command.
+Every command gets `-c core.fsmonitor=false -c color.ui=never` plus
+`protocol.http|https|git|ssh|file.allow=never`, and runs with `GIT_OPTIONAL_LOCKS=0`
+(status never takes `index.lock` or rewrites the index), `GIT_NO_LAZY_FETCH=1` (partial
+clones must not demand-fetch missing promised objects), `GIT_TERMINAL_PROMPT=0`,
+`LC_ALL=C`, and with `GIT_DIR`, `GIT_WORK_TREE`, `GIT_INDEX_FILE`, `GIT_OBJECT_DIRECTORY`,
+`GIT_COMMON_DIR`, `GIT_NAMESPACE`, `GIT_TRACE*` and similar redirections removed. The
+executable is the first `git` (`git.exe` on Windows) in an **absolute** `PATH` entry; the
+current directory is never searched, relative PATH entries are skipped, and Windows
+`git.cmd` / `git.bat` shims are never selected — the same policy `doctor` uses. On Windows
+Git runs without a console and in its own process group (POSIX: its own session), so
+Ctrl+C aimed at the recorder never interrupts it; a forced stop kills a running Git
+command.
 
 Only SHAs validated as 40/64-hex are ever passed as arguments. Remote URLs, `git config`,
-credential helpers and SSH configuration are never queried.
+credential helpers and SSH configuration are never queried. Observation never initiates
+http/https/ssh/git/file transport to retrieve missing objects; missing promised objects
+yield problem or unavailable evidence instead.
 
 **Recording boundary.** The selected project directory is the boundary. If it is a
 subdirectory of a repository, status is limited to it with a pathspec and paths are stored
@@ -832,10 +843,12 @@ argv is lossy: `argv_truncated`, `argv_redacted`, `argument_count` not matching,
 argument after the program rewritten to `<external-path>` (two different paths would look
 identical). The program itself (`argv[0]`) is accepted when it was rewritten to
 `<external-path>` because absolute interpreter paths always are; the recorded executable
-file name stands in for it. So `pytest tests/auth` and `pytest tests/billing`, or the same
-argv in two working directories, are different checks; missing a recovery is preferred
-over inventing one. When several signatures share a name, `display_name` adds the first 8
-hex characters (`pytest [2221cf76]`).
+file name stands in for it. Absolute project paths are recorded as `<project>/...`, so
+`python <abs>/check.py` and `python check.py` from the same working directory remain
+different checks even though both refer to a file named `check.py`. So `pytest tests/auth`
+and `pytest tests/billing`, or the same argv in two working directories, are different
+checks; missing a recovery is preferred over inventing one. When several signatures share
+a name, `display_name` adds the first 8 hex characters (`pytest [2221cf76]`).
 
 **Relationship validation.** Per `command_id`: `command.started` -> `command.finished` ->
 optional check event. Indexes are built in the single pass. Contradictions produce a

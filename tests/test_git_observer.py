@@ -76,6 +76,13 @@ def test_find_git_executable_never_uses_current_directory(
     assert find_git_executable(str(tmp_path)) == str(planted)
 
 
+@pytest.mark.skipif(sys.platform != "win32", reason="Windows git.cmd / git.bat trap")
+def test_find_git_executable_ignores_cmd_and_bat_shims(tmp_path: Path) -> None:
+    (tmp_path / "git.cmd").write_text("@echo off\r\necho planted\r\n", encoding="utf-8")
+    (tmp_path / "git.bat").write_text("@echo off\r\necho planted\r\n", encoding="utf-8")
+    assert find_git_executable(str(tmp_path)) is None
+
+
 def test_git_environment_drops_redirections_and_disables_locks() -> None:
     env = git_environment(
         {"PATH": "/bin", "GIT_DIR": "/elsewhere", "GIT_WORK_TREE": "/x", "GIT_TRACE": "1"}
@@ -83,6 +90,7 @@ def test_git_environment_drops_redirections_and_disables_locks() -> None:
     assert "GIT_DIR" not in env and "GIT_WORK_TREE" not in env and "GIT_TRACE" not in env
     assert env["GIT_OPTIONAL_LOCKS"] == "0"
     assert env["GIT_TERMINAL_PROMPT"] == "0"
+    assert env["GIT_NO_LAZY_FETCH"] == "1"
     assert env["PATH"] == "/bin"
 
 

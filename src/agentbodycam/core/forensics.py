@@ -18,7 +18,9 @@ Rules (see docs/architecture.md, "Local forensics engine"):
 - Two check runs are the *same check* only when their signature matches: a SHA-256 over
   the canonical JSON of the check kind and name and the paired ``command.started``'s
   recorded executable, recorded (redacted) argv and project-relative working directory.
-  When the recorded argv is lossy (truncated, redacted, or an argument rewritten to
+  Absolute project paths are recorded as ``<project>/...``, so they cannot collapse with
+  an originally relative argument that happens to look the same after redaction. When the
+  recorded argv is lossy (truncated, redacted, or an argument rewritten to
   ``<external-path>``) the run is left ungrouped: missing a recovery is preferred over
   inventing one.
 - command.started -> command.finished -> optional check event is validated per

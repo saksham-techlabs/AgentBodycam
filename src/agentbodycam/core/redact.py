@@ -9,7 +9,8 @@ untouched arguments. The rules prefer hiding too much over leaking a secret:
 - recognisable API keys and tokens anywhere (GitHub, OpenAI/Anthropic-style ``sk-``, AWS,
   Slack, Google, Stripe, npm, JWTs, private-key blocks) and long mixed-case random-looking
   strings,
-- absolute paths: inside the project they become project-relative POSIX paths, anywhere
+- absolute paths: inside the project they become ``<project>`` / ``<project>/rel`` (so
+  forensics can tell a rewritten absolute path from one that was typed relative), anywhere
   else ``<external-path>``; the project and home directories are never stored verbatim.
   Drive and UNC paths count as absolute on every platform, and so do driveless rooted
   paths with two or more segments on Windows (``/home/me/x``, ``\\Users\\me\\x``).
@@ -205,7 +206,13 @@ class _Redactor:
     def _path(self, text: str) -> str:
         self.paths_rewritten = True
         relative = project_relative(text, self.project_root, self.home)
-        return EXTERNAL_PATH if relative is None else relative
+        if relative is None:
+            return EXTERNAL_PATH
+        # Keep a privacy-safe provenance marker: an argument that was absolute (and
+        # rewritten) must not look identical to one that was typed as a relative path.
+        if relative == ".":
+            return PROJECT_PLACEHOLDER
+        return f"{PROJECT_PLACEHOLDER}/{relative}"
 
 
 _WINDOWS = sys.platform == "win32"

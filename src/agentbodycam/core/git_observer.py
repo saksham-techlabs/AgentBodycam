@@ -3,8 +3,10 @@
 The observer runs a small, fixed set of read-only Git commands (``rev-parse``, ``status``,
 ``merge-base --is-ancestor``, ``log``) and turns their machine-readable output into a
 structured snapshot. It never commits, checks out, resets, stashes, fetches, pushes or
-changes configuration, never writes the index (``GIT_OPTIONAL_LOCKS=0``) and never reads
-remote URLs, ``.git/config``, credentials or file contents.
+changes configuration, never writes the index (``GIT_OPTIONAL_LOCKS=0``), never lazily
+fetches missing promisor objects (``GIT_NO_LAZY_FETCH=1``), and never reads remote URLs,
+``.git/config``, credentials or file contents. Missing promised objects yield unavailable
+or problem evidence — never network access.
 
 Snapshots say *what* the Git state was when observed; they never say who changed it.
 """

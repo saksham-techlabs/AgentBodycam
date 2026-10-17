@@ -184,12 +184,18 @@ INFORMATIONAL = [
     "npm run test -- --help",
     "npm run build -- --help",
     "npm run lint -- --version",
+    "npm run build --if-present",
+    "npm run-script test --if-present",
     "pnpm test -- --help",
     "pnpm lint -- --help",
     "pnpm run typecheck -- -h",
+    "pnpm run build --if-present",
+    "pnpm build --if-present",
     "yarn lint -- --help",
     "yarn typecheck -- --help",
     "yarn build -- -v",
+    "yarn run build --if-present",
+    "yarn build --if-present",
 ]
 
 
@@ -252,6 +258,14 @@ def test_genuine_runs_are_still_automatic_checks(argv: str, kind: CheckKind, nam
 def test_explicit_check_still_classifies_informational_invocations(argv: str, name: str) -> None:
     result = explicit_classification(TEST, argv.split())
     assert result == CheckClassification(TEST, name, ClassificationSource.EXPLICIT)
+
+
+def test_explicit_check_still_classifies_if_present_package_scripts() -> None:
+    """Explicit --check keeps user intent; automatic classification refuses --if-present."""
+    argv = ["npm", "run", "build", "--if-present"]
+    assert classify_command(argv) is None
+    result = explicit_classification(BUILD, argv)
+    assert result == CheckClassification(BUILD, "npm build", ClassificationSource.EXPLICIT)
 
 
 @pytest.mark.parametrize(

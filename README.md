@@ -150,7 +150,8 @@ python -m agentbodycam doctor
 ```
 
 `doctor` prints your Python version, operating system, current directory and whether Git
-is available. It does not change anything on your system.
+is available. It uses the same safe Git discovery as the recorder (never a project-local
+`git.cmd` / `git.bat`). It does not change anything on your system.
 
 ### Recording file and Git changes
 
@@ -204,8 +205,9 @@ What this is, and is not:
   state changes (branch, HEAD commit, detached HEAD, upstream ahead/behind, staged /
   unstaged / untracked / conflicted paths, clean or dirty). Git is polled about every 2
   seconds with read-only commands only; AgentBodycam never commits, checks out, resets,
-  stashes, fetches or pushes. It stores no diffs, no commit bodies, no author emails and no
-  remote URLs, and it never says *who* made a Git change.
+  stashes, fetches or pushes, and disables lazy fetching of missing promised objects during
+  observation. It stores no diffs, no commit bodies, no author emails and no remote URLs,
+  and it never says *who* made a Git change.
 - Only one `record` can run per project. A second one exits with
   `error: AgentBodycam is already recording this project` and the running session's ID.
   If a recorder crashes or is killed, the next `record` starts normally; no cleanup needed.
@@ -249,8 +251,8 @@ session.stopped
   the environment. **Its output, input and environment are never recorded.**
 - Arguments are recorded with likely secrets redacted (`--token X`, `--api-key=X`,
   `password=X`, `https://user:pass@host`, recognisable API keys and tokens) and absolute
-  paths rewritten (project-relative, or `<external-path>`). The command itself always
-  receives the original arguments. See
+  paths rewritten (`<project>/…` inside the project, or `<external-path>`). The command
+  itself always receives the original arguments. See
   [the redaction rules](docs/architecture.md#wrapped-commands).
 - `run` only works while a recording is active for the project. Otherwise it prints
   `error: no active AgentBodycam recording for this project` and **does not run the
@@ -305,10 +307,11 @@ check.passed       Test passed: pytest
   `npm run custom` and so on are never guessed.
 - **Informational and discovery-only runs stay plain commands too**: `pytest --version`,
   `mypy --help`, `pytest --collect-only`, `cargo test --no-run`, `go test -list X`,
-  `dotnet test --list-tests`, `tsc --noEmit --showConfig`, `npm test -- --help`, ...
-  They exit 0 without testing, linting or type checking anything, so they must never count
-  as evidence that the project's checks passed. (`--check` still forces a check if you
-  really want one.)
+  `dotnet test --list-tests`, `tsc --noEmit --showConfig`, `npm test -- --help`,
+  `npm run build --if-present` (and the equivalent `pnpm` / `yarn` forms), ...
+  They exit 0 without testing, building, linting or type checking anything, so they must
+  never count as evidence that the project's checks passed. (`--check` still forces a
+  check if you really want one.)
 - A check **passes only if the process exited by itself with status 0.** A non-zero exit,
   a signal, an interrupt (Ctrl+C) or a failure to start an explicit `--check` command is a
   failure, and the event says which (`reason`).

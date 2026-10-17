@@ -6,10 +6,11 @@ A check is either classified *explicitly* (``agentbodycam run --check KIND -- ..
 authoritative) or *automatically*: a conservative whitelist of command lines that appear
 to actually execute a check (``python -m pytest``, ``cargo test``, ``npm run build``,
 ``tsc --noEmit``, ...). Anything else, including ``python script.py``, ``make``, an unknown
-npm script, or a recognised tool invoked only for information (``pytest --version``,
-``mypy --help``, ``pytest --collect-only``, ``cargo test --no-run``), is left
-unclassified: it stays a plain command. A future forensic engine must never read
-``pytest --version`` exiting 0 as evidence that the test suite passed.
+npm script, a package-manager script allowed to no-op (``npm run build --if-present``),
+or a recognised tool invoked only for information (``pytest --version``, ``mypy --help``,
+``pytest --collect-only``, ``cargo test --no-run``), is left unclassified: it stays a plain
+command. A future forensic engine must never read ``pytest --version`` exiting 0 as
+evidence that the test suite passed.
 
 Check names are never built by joining argv. They come from fixed strings for recognised
 tools, or (explicit classification of an unrecognised command) from the program's
@@ -160,7 +161,9 @@ _NO_RUN_FLAGS: dict[str, frozenset[str]] = {
 }
 # npm / pnpm / yarn scripts run an unknown underlying tool: any common help or version
 # flag after the script name (e.g. `npm test -- --help`) leaves it unclassified.
-_SCRIPT_NO_RUN_FLAGS = _HELP | {"-?", "--version", "-v", "-V"}
+# `--if-present` makes a missing script exit 0 without running anything — that must never
+# become an automatic passed check.
+_SCRIPT_NO_RUN_FLAGS = _HELP | {"-?", "--version", "-v", "-V", "--if-present"}
 
 _PACKAGE_SCRIPTS = {
     "test": CheckKind.TEST,

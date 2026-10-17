@@ -46,11 +46,18 @@ How Git is read:
   `git merge-base --is-ancestor` and `git log`. AgentBodycam never commits, checks out,
   resets, stashes, fetches, pulls, pushes or changes Git configuration.
 - Commands run without a shell, with a fixed argument list, a timeout and an output cap,
-  using the first absolute `git` on `PATH` (never one in the current directory), with
-  `GIT_OPTIONAL_LOCKS=0` (the index is never rewritten), `core.fsmonitor=false`, no
-  terminal prompts, and `GIT_DIR`-style redirection variables removed.
+  using the first absolute `git` / `git.exe` on `PATH` (never the current directory, never
+  a relative PATH entry, and on Windows never a project-local `git.cmd` / `git.bat`). The
+  same discovery policy is used by `doctor` and by the recorder.
+- Observation disables lazy fetching / remote object retrieval: every Git subprocess runs
+  with `GIT_NO_LAZY_FETCH=1` and with `protocol.http|https|git|ssh|file.allow=never`, so a
+  partial clone with missing promised objects yields unavailable or problem evidence
+  instead of contacting a remote. Also `GIT_OPTIONAL_LOCKS=0` (the index is never
+  rewritten), `core.fsmonitor=false`, no terminal prompts, and `GIT_DIR`-style redirection
+  variables removed.
 - Git may still run clean filters configured by the repository (for example Git LFS) while
-  computing status, exactly as a plain `git status` would.
+  computing status, exactly as a plain `git status` would. That is separate from remote
+  object fetch; AgentBodycam does not claim Git can never execute anything.
 
 Wrapped commands (`agentbodycam run -- <command> [args...]`):
 
@@ -63,13 +70,16 @@ Wrapped commands (`agentbodycam run -- <command> [args...]`):
 - `command.started` stores a **redacted** copy of the arguments: values of options and
   assignments with sensitive names (`--token X`, `--api-key=X`, `password=X`,
   `Authorization: ...`), URL credentials and sensitive query parameters, recognisable API
-  keys/tokens and long random-looking strings become `<redacted>`; absolute paths become
-  project-relative or `<external-path>`, and the project and home directories are never
-  stored verbatim. Drive and UNC paths (`C:\...`, `\\server\...`) count as absolute on
-  every platform, and on Windows so do driveless rooted paths with two or more segments
-  (`/home/<name>/...`, `\Users\<name>\...`); single-segment switches such as `/c` are kept. The argument list is capped (64 items, 256 characters each, 4096 in
-  total). Redaction is pattern-based and conservative but cannot recognise every secret:
-  avoid passing secrets on the command line, as you would for shell history.
+  keys/tokens and long random-looking strings become `<redacted>`; absolute paths inside
+  the project become `<project>` / `<project>/rel` (so an originally absolute path cannot
+  be mistaken for one typed relative), anything else becomes `<external-path>`, and the
+  project and home directories are never stored verbatim. Drive and UNC paths (`C:\...`,
+  `\\server\...`) count as absolute on every platform, and on Windows so do driveless
+  rooted paths with two or more segments (`/home/<name>/...`, `\Users\<name>\...`);
+  single-segment switches such as `/c` are kept. The argument list is capped (64 items,
+  256 characters each, 4096 in total). Redaction is pattern-based and conservative but
+  cannot recognise every secret: avoid passing secrets on the command line, as you would
+  for shell history.
 - `command.finished` stores the exit code or signal, duration, child PID, an outcome and,
   for a start failure, only the exception type and errno.
 - **Never stored:** command output (stdout/stderr), stdin, environment variables, the

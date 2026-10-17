@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Critical audit findings ABD-001 … ABD-004 (Task 14A; ABD-005 … ABD-008 not addressed):
+  - **ABD-001**: `doctor` used `shutil.which("git")`, which on Windows can execute a
+    project-local `git.cmd` / `git.bat`. Git discovery is consolidated on
+    `find_git_executable` (absolute PATH only, never cwd, never `.cmd`/`.bat` shims).
+  - **ABD-002**: absolute project paths redacted to a bare relative form could collide
+    with originally relative argv, inventing a false OBSERVED RECOVERY. Absolute project
+    paths are now recorded as `<project>/…` so identities stay distinct without storing
+    private absolute paths.
+  - **ABD-003**: `npm run build --if-present` (and pnpm/yarn equivalents) exited 0 with no
+    script and was auto-classified as a passed build. Automatic classification now rejects
+    `--if-present`; explicit `--check` still allows the user to mark the invocation.
+  - **ABD-004**: Git observation could lazy-fetch missing promisor objects (network via the
+    Git subprocess). Observation now forces `GIT_NO_LAZY_FETCH=1` and
+    `protocol.http|https|git|ssh|file.allow=never`.
+
 ### Added
 
 - Cross-platform CI configuration (not run yet: the repository is not published).

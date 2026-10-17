@@ -315,7 +315,7 @@ def test_missing_explicit_path_records_no_absolute_path(live: Recorder, project:
     assert str(project).encode() not in data
     assert json.dumps(str(project))[1:-1].encode() not in data
     started, _finished = command_events(live.store, live.session.session_id)
-    assert started.payload["argv"] == ["bin/nothing-here"]
+    assert started.payload["argv"] == ["<project>/bin/nothing-here"]
 
 
 def test_unicode_and_spaces_reach_the_child_untouched(

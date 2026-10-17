@@ -2,14 +2,15 @@
 
 Only read-only Git commands are ever passed to :func:`run_git`. Commands run without a
 shell, with a fixed executable, a timeout and a cap on captured output, and with
-``GIT_OPTIONAL_LOCKS=0`` so even ``git status`` never rewrites the index.
+``GIT_OPTIONAL_LOCKS=0`` so even ``git status`` never rewrites the index. Lazy fetching
+of missing promisor objects is disabled (``GIT_NO_LAZY_FETCH=1``), so observation never
+contacts a remote merely because an object is absent.
 """
 
 from __future__ import annotations
 
 import contextlib
 import os
-import shutil
 import subprocess
 import sys
 import threading
@@ -46,14 +47,60 @@ _FORCED_ENV = {
     "PAGER": "cat",
     "LC_ALL": "C",  # stable, untranslated error messages
     "LANGUAGE": "C",
+    # Partial clones must not demand-fetch missing objects during observation.
+    "GIT_NO_LAZY_FETCH": "1",
 }
-# Configuration overrides applied to every command: no fsmonitor hook/daemon, no colour.
-_SAFE_CONFIG = ("-c", "core.fsmonitor=false", "-c", "color.ui=never")
+# Configuration overrides applied to every command: no fsmonitor hook/daemon, no colour,
+# and no transport that could retrieve objects from a remote during observation.
+_SAFE_CONFIG = (
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "color.ui=never",
+    "-c",
+    "protocol.http.allow=never",
+    "-c",
+    "protocol.https.allow=never",
+    "-c",
+    "protocol.git.allow=never",
+    "-c",
+    "protocol.ssh.allow=never",
+    "-c",
+    "protocol.file.allow=never",
+)
+
+
+def find_git_executable(path_env: str | None = None) -> str | None:
+    """Absolute path of the first trusted ``git`` executable on PATH, or ``None``.
+
+    Unlike :func:`shutil.which`, the current directory is never searched (Windows would
+    otherwise run a ``git.exe`` / ``git.cmd`` / ``git.bat`` planted in the project) and
+    relative PATH entries are skipped. On Windows only ``git.exe`` is accepted — never a
+    project-local ``git.cmd`` or ``git.bat``.
+    """
+    search = os.environ.get("PATH", "") if path_env is None else path_env
+    name = "git.exe" if sys.platform == "win32" else "git"
+    for entry in search.split(os.pathsep):
+        entry = entry.strip().strip('"')
+        if not entry or not Path(entry).is_absolute():
+            continue
+        candidate = Path(entry) / name
+        if not candidate.is_file() or not os.access(candidate, os.X_OK):
+            continue
+        # Defense in depth: never treat a shell-script shim as Git.
+        if candidate.suffix.lower() in {".cmd", ".bat", ".com"}:
+            continue
+        return str(candidate)
+    return None
 
 
 def detect_git() -> ToolStatus:
-    """Report whether a ``git`` executable is on PATH and its version, if obtainable."""
-    path = shutil.which("git")
+    """Report whether a trusted ``git`` executable is on PATH and its version, if obtainable.
+
+    Uses :func:`find_git_executable` — the same policy as the recorder — so a project-local
+    ``git.cmd`` / ``git.bat`` / relative PATH entry is never selected or executed.
+    """
+    path = find_git_executable()
     if path is None:
         return ToolStatus(name="git", available=False)
 
@@ -71,25 +118,6 @@ def detect_git() -> ToolStatus:
     output = completed.stdout.strip()
     version = output if completed.returncode == 0 and output else None
     return ToolStatus(name="git", available=True, path=path, version=version)
-
-
-def find_git_executable(path_env: str | None = None) -> str | None:
-    """Absolute path of the first ``git`` executable on PATH, or ``None``.
-
-    Unlike :func:`shutil.which`, the current directory is never searched (Windows would
-    otherwise run a ``git.exe`` planted in the project being recorded) and relative PATH
-    entries are skipped.
-    """
-    search = os.environ.get("PATH", "") if path_env is None else path_env
-    name = "git.exe" if sys.platform == "win32" else "git"
-    for entry in search.split(os.pathsep):
-        entry = entry.strip().strip('"')
-        if not entry or not Path(entry).is_absolute():
-            continue
-        candidate = Path(entry) / name
-        if candidate.is_file() and os.access(candidate, os.X_OK):
-            return str(candidate)
-    return None
 
 
 def git_environment(base: Mapping[str, str] | None = None) -> dict[str, str]:

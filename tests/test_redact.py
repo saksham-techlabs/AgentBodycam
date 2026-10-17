@@ -164,8 +164,19 @@ def test_project_paths_become_relative() -> None:
     result = redact_command(
         ["python", native("src", "app.py"), native()], project_root=PROJECT, home=HOME
     )
-    assert result.argv == ("python", "src/app.py", ".")
+    # Absolute project paths keep a <project>/ provenance marker so they cannot
+    # collapse with an originally relative argument after redaction.
+    assert result.argv == ("python", "<project>/src/app.py", "<project>")
     assert result.paths_rewritten
+
+
+def test_absolute_and_relative_project_paths_stay_distinct() -> None:
+    absolute = redact_command(["python", native("check.py")], project_root=PROJECT, home=HOME)
+    relative = redact_command(["python", "check.py"], project_root=PROJECT, home=HOME)
+    assert absolute.argv == ("python", "<project>/check.py")
+    assert relative.argv == ("python", "check.py")
+    assert absolute.argv != relative.argv
+    assert absolute.paths_rewritten and not relative.paths_rewritten
 
 
 def test_external_paths_are_hidden() -> None:
@@ -189,7 +200,7 @@ def test_assignment_paths_and_embedded_roots_are_rewritten() -> None:
         project_root=PROJECT,
         home=HOME,
     )
-    assert result.argv[1] == "--cov=src"
+    assert result.argv[1] == "--cov=<project>/src"
     assert result.argv[2] == f"--basetemp={EXTERNAL_PATH}"
     assert result.argv[3] == f"a;<project>{sep}lib"
     assert str(HOME) not in "".join(result.argv)
@@ -233,7 +244,7 @@ def test_project_relative_helper() -> None:
 
 @pytest.mark.skipif(not WINDOWS, reason="Windows paths are case-insensitive")
 def test_windows_project_paths_match_case_insensitively() -> None:
-    assert redact("tool", r"c:\users\ME\WORK\app\src") == ("tool", "src")
+    assert redact("tool", r"c:\users\ME\WORK\app\src") == ("tool", "<project>/src")
 
 
 # -- bounds ------------------------------------------------------------------------------
