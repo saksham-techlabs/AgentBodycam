@@ -19,6 +19,7 @@ from agentbodycam.core.command import (
     check_draft,
     should_record_check,
 )
+from agentbodycam.core.forensics import analyze_session
 from agentbodycam.core.recorder import Recorder
 from agentbodycam.core.store import EventStore
 from agentbodycam.models.events import Event, EventSource, EventType
@@ -243,12 +244,19 @@ def test_explicit_check_on_an_informational_run_is_honoured(live: Recorder, proj
 
 
 def test_real_pytest_failure_then_success(live: Recorder, project: Path) -> None:
+    # Same-length revisions can keep pytest's assertion-rewrite .pyc valid when the
+    # filesystem does not advance mtime (common on hosted CI). Differing sizes force
+    # importlib to invalidate the cache without sleeping for timestamp granularity.
+    failing = "def test_value():\n    assert 1 == 2\n"
+    passing = "def test_value():\n    assert 2 == 2  # recovered\n"
+    assert len(failing.encode()) != len(passing.encode())
     test_file = project / "test_demo.py"
-    test_file.write_text("def test_value():\n    assert 1 == 2\n", encoding="utf-8")
+    test_file.write_text(failing, encoding="utf-8")
     # Run from outside the project, so the child runs in the project root.
     argv = [sys.executable, "-m", "pytest", "-q", "-p", "no:cacheprovider", "test_demo.py"]
     first = run(project, *argv)
-    test_file.write_text("def test_value():\n    assert 2 == 2\n", encoding="utf-8")
+    test_file.write_text(passing, encoding="utf-8")
+    assert test_file.read_text(encoding="utf-8") == passing
     second = run(project, *argv)
     assert first[0] == 1 and second[0] == 0, (first, second)
     failed, passed = checks_of(live)
@@ -258,6 +266,11 @@ def test_real_pytest_failure_then_success(live: Recorder, project: Path) -> None
     assert passed.type is EventType.CHECK_PASSED and passed.summary == "Test passed: pytest"
     assert failed.payload["check_id"] != passed.payload["check_id"]
     assert failed.payload["command_id"] != passed.payload["command_id"]
+    report = analyze_session(live.store, live.session.session_id)
+    assert report.recoveries.total == 1
+    [recovery] = report.recoveries.items
+    assert recovery.recovered_event_id == passed.event_id
+    assert recovery.first_failed_event_id == failed.event_id
 
 
 @pytest.mark.parametrize(
