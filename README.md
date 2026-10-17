@@ -309,9 +309,10 @@ check.passed       Test passed: pytest
 - **Informational and discovery-only runs stay plain commands too**: `pytest --version`,
   `mypy --help`, `pytest --collect-only`, `cargo test --no-run`, `go test -list X`,
   `dotnet test --list-tests`, `tsc --noEmit --showConfig`, `npm test -- --help`,
-  `npm run build --if-present` (including `--if-present=true` / `=1` and accepted
-  abbreviations such as `--if-pres`; tokens after `--` are script args, not npm's
-  optional flag), `pnpm run --if-present build`, ...
+  `npm run build --if-present` (and any other npm manager-level token after the script
+  name before `--`; AgentBodycam does not emulate npm's option parser — only canonical
+  `npm run …` / `npm test` shapes, optionally with `--` plus script args, are
+  auto-classified), `pnpm run --if-present build`, ...
   They exit 0 without testing, building, linting or type checking anything, so they must
   never count as evidence that the project's checks passed. (`--check` still forces a
   check if you really want one.)

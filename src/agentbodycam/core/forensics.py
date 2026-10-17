@@ -20,10 +20,11 @@ Rules (see docs/architecture.md, "Local forensics engine"):
   recorded executable, recorded (redacted) argv, per-item argv origins and
   project-relative working directory. Absolute project paths are recorded as
   ``<project>/...`` with origin ``project_path``, so they cannot collapse with an
-  originally relative argument or with a user-typed literal ``<project>/...``. When the
-  recorded argv is lossy (truncated, redacted, or an argument rewritten to
-  ``<external-path>``) the run is left ungrouped: missing a recovery is preferred over
-  inventing one.
+  originally relative argument or with a user-typed literal ``<project>/...``. Embedded
+  path rewrites (origin ``embedded_path``), external-path rewrites after argv[0],
+  truncated/redacted argv, malformed provenance, and legacy argv that contains reserved
+  redaction markers without trustworthy origins are left ungrouped: missing a recovery is
+  preferred over inventing one.
 - command.started -> command.finished -> optional check event is validated per
   ``command_id``. Contradictory relationships (duplicate starts, a finish or check without
   a start, a check before its finish, a check that contradicts its finish) are reported as
@@ -165,13 +166,13 @@ def check_signature(kind: str, name: str, started: Event) -> str | None:
 
     Built only from evidence already stored: the check's kind and generated name and the
     paired ``command.started``'s recorded executable, recorded (redacted) argv, per-item
-    argv origins (when present) and recorded project-relative working directory. The
-    original process argv is never involved. ``None`` when the recorded argv does not
-    faithfully identify the invocation: truncated, redacted, an argument (after the
-    program itself) rewritten to ``<external-path>``, or (legacy recordings without
-    origins) a reserved placeholder that could equally be user-typed literal text —
-    because two different invocations could then look identical. A missed recovery is
-    preferred over an invented one.
+    argv origins (when present and valid) and recorded project-relative working directory.
+    The original process argv is never involved. ``None`` when identity cannot be proved:
+    truncated or redacted argv, an argument after the program rewritten to
+    ``<external-path>``, an embedded path rewrite inside a larger argv item, malformed or
+    inconsistent ``argv_item_origins``, or (legacy recordings without origins) any
+    reserved redaction marker in the recorded argv. A missed recovery is preferred over
+    an invented one.
     """
     payload = started.payload
     argv = payload.get("argv")
@@ -195,16 +196,20 @@ def check_signature(kind: str, name: str, started: Event) -> str | None:
         return None
     if REDACTED in items[0]:
         return None
-    origins = _argv_item_origins(payload, len(items))
-    # Legacy command.started without origins: refuse to group when a reserved
-    # marker appears without path-rewrite provenance — a literal typed
-    # ``<project>/…`` must not recover against a rewritten absolute path.
-    if (
-        origins is None
-        and _bool(payload, "argv_paths_rewritten") is not True
-        and any(contains_reserved_marker(item) for item in items)
-    ):
-        return None
+
+    if "argv_item_origins" not in payload:
+        # Legacy: no trustworthy provenance. Group only when argv is unambiguous.
+        if _legacy_argv_ambiguous(items):
+            return None
+        origins: list[str] | None = None
+    else:
+        origins = _validated_argv_item_origins(payload.get("argv_item_origins"), len(items))
+        if origins is None:
+            # Present but null / wrong type / wrong length / unknown — do not invent.
+            return None
+        if _origins_make_ungroupable(origins):
+            return None
+
     basis: JsonObject = {
         "version": SIGNATURE_VERSION,
         "kind": kind,
@@ -221,11 +226,8 @@ def check_signature(kind: str, name: str, started: Event) -> str | None:
 _ORIGIN_VALUES = frozenset(origin.value for origin in ArgvItemOrigin)
 
 
-def _argv_item_origins(payload: JsonObject, expected_len: int) -> list[str] | None:
-    """Return validated per-item origins, or ``None`` when absent / unusable."""
-    raw = payload.get("argv_item_origins")
-    if raw is None:
-        return None
+def _validated_argv_item_origins(raw: object, expected_len: int) -> list[str] | None:
+    """Return validated per-item origins, or ``None`` when unusable (including null)."""
     if (
         not isinstance(raw, list)
         or len(raw) != expected_len
@@ -233,6 +235,29 @@ def _argv_item_origins(payload: JsonObject, expected_len: int) -> list[str] | No
     ):
         return None
     return [str(item) for item in raw]
+
+
+def _origins_make_ungroupable(origins: Sequence[str]) -> bool:
+    """True when provenance proves the recorded argv cannot safely identify the check."""
+    for index, origin in enumerate(origins):
+        if origin == ArgvItemOrigin.EMBEDDED_PATH.value:
+            return True
+        if index > 0 and origin == ArgvItemOrigin.EXTERNAL_PATH.value:
+            return True
+    return False
+
+
+def _legacy_argv_ambiguous(items: Sequence[str]) -> bool:
+    """True when legacy argv contains reserved/redaction markers without provenance.
+
+    ``argv[0]`` equal to ``<external-path>`` alone is accepted: absolute interpreters are
+    always rewritten that way, and the recorded executable file name stands in for them.
+    Any other reserved marker — including markers embedded inside a larger string — makes
+    identity unprovable without ``argv_item_origins``.
+    """
+    if items[0] != EXTERNAL_PATH and contains_reserved_marker(items[0]):
+        return True
+    return any(contains_reserved_marker(item) for item in items[1:])
 
 
 # -- file-change windows -------------------------------------------------------------------

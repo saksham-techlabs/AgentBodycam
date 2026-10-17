@@ -6,11 +6,12 @@ A check is either classified *explicitly* (``agentbodycam run --check KIND -- ..
 authoritative) or *automatically*: a conservative whitelist of command lines that appear
 to actually execute a check (``python -m pytest``, ``cargo test``, ``npm run build``,
 ``tsc --noEmit``, ...). Anything else, including ``python script.py``, ``make``, an unknown
-npm script, an npm script allowed to no-op (``npm run build --if-present`` and accepted
-value / abbreviation forms), or a recognised tool invoked only for information
-(``pytest --version``, ``mypy --help``, ``pytest --collect-only``, ``cargo test --no-run``),
-is left unclassified: it stays a plain command. A future forensic engine must never read
-``pytest --version`` exiting 0 as evidence that the test suite passed.
+npm script, an npm invocation with manager-level tokens after the script name and before
+``--`` (for example ``npm run build --if-present`` and any other npm option shape), or a
+recognised tool invoked only for information (``pytest --version``, ``mypy --help``,
+``pytest --collect-only``, ``cargo test --no-run``), is left unclassified: it stays a plain
+command. A future forensic engine must never read ``pytest --version`` exiting 0 as
+evidence that the test suite passed.
 
 Check names are never built by joining argv. They come from fixed strings for recognised
 tools, or (explicit classification of an unrecognised command) from the program's
@@ -161,11 +162,10 @@ _NO_RUN_FLAGS: dict[str, frozenset[str]] = {
 }
 # npm / pnpm / yarn scripts run an unknown underlying tool: any common help or version
 # flag after the script name (e.g. `npm test -- --help`) leaves it unclassified.
-# npm's optional-script flag is handled separately (see ``_npm_optional_script``): exact
-# ``--if-present`` matching is not enough — npm also accepts ``--if-present=true``,
-# ``--if-present=1`` and unique prefixes such as ``--if-pres``.
+# npm automatic classification also refuses *any* manager-level token after the recognised
+# script name and before ``--`` (see ``_executes_check``): AgentBodycam does not emulate
+# npm's option parser.
 _SCRIPT_NO_RUN_FLAGS = _HELP | {"-?", "--version", "-v", "-V"}
-_NPM_IF_PRESENT = "if-present"
 
 _PACKAGE_SCRIPTS = {
     "test": CheckKind.TEST,
@@ -239,50 +239,11 @@ def _package_script(manager: str, args: Sequence[str]) -> _Match | None:
     return None if kind is None else (kind, f"{manager} {script}", rest)
 
 
-def _long_option(token: str) -> tuple[str, str | None] | None:
-    """``(--name, None)`` or ``(--name, value)`` for a GNU-style long option; else ``None``.
-
-    Does not implement a full package-manager parser: only ``--name`` / ``--name=value``.
-    ``--`` itself and single-dash flags are not long options.
-    """
-    if not token.startswith("--") or len(token) == 2 or token.startswith("---"):
-        return None
-    body = token[2:]
-    if not body or body.startswith("-"):
-        return None
-    if "=" in body:
-        name, value = body.split("=", 1)
-        return (name, value) if name else None
-    return body, None
-
-
-def _is_npm_if_present_option(token: str) -> bool:
-    """True when ``token`` is npm's optional-script flag (including accepted abbreviations).
-
-    Real npm 11 treats ``--if-present``, ``--if-present=true``, ``--if-present=1`` and
-    unique prefixes such as ``--if-pres`` / ``--if`` as enabling the option (missing
-    scripts then exit 0). Case-sensitive: ``--IF-PRESENT`` is not the option. Any
-    recognised form prevents automatic classification; false negatives are acceptable.
-    """
-    parsed = _long_option(token)
-    if parsed is None:
-        return False
-    name, _value = parsed
-    # npm's nopt-style abbreviation: a prefix of ``if-present`` of length ≥ 2
-    # (``--i`` is not accepted; ``--if`` is).
-    return len(name) >= 2 and _NPM_IF_PRESENT.startswith(name)
-
-
 def _before_double_dash(args: Sequence[str]) -> list[str]:
-    """Package-manager options stop at ``--``; later tokens are script arguments."""
+    """Tokens before an explicit ``--`` boundary (empty when ``--`` is first or absent)."""
     if "--" in args:
         return list(args[: args.index("--")])
     return list(args)
-
-
-def _npm_optional_script(args: Sequence[str]) -> bool:
-    """True when an npm manager-level optional-script flag is present (before ``--``)."""
-    return any(_is_npm_if_present_option(arg) for arg in _before_double_dash(args))
 
 
 def _match(argv: Sequence[str]) -> _Match | None:
@@ -310,10 +271,13 @@ def _executes_check(name: str, args: Sequence[str]) -> bool:
     if manager in ("npm", "pnpm", "yarn"):
         if any(arg in _SCRIPT_NO_RUN_FLAGS for arg in args):
             return False
-        # Only npm accepts ``--if-present`` *after* the script name as a manager option.
-        # pnpm requires it before the script name (already unclassified by parse); after
-        # the script name it is forwarded to the script. Yarn classic has no equivalent.
-        return not (manager == "npm" and _npm_optional_script(args))
+        # npm only: do not emulate npm's option parser. Any token after the recognised
+        # script name and before an explicit ``--`` makes manager vs script ownership
+        # uncertain (``--if-present``, abbreviations, future options, …). Tokens after
+        # ``--`` are script arguments and do not block classification. pnpm/yarn keep
+        # their existing behaviour: before-script optional forms never parse as a known
+        # script; after-script tokens are not treated as npm manager no-ops.
+        return not (manager == "npm" and _before_double_dash(args))
     flags = _NO_RUN_FLAGS[name]
     for arg in args:
         if name == "tsc":
@@ -329,10 +293,11 @@ def _executes_check(name: str, args: Sequence[str]) -> bool:
 def classify_command(argv: Sequence[str]) -> CheckClassification | None:
     """Automatic classification of a command line that appears to actually run a check.
 
-    ``None`` for anything not on the whitelist, and for whitelisted tools invoked only for
+    ``None`` for anything not on the whitelist, for whitelisted tools invoked only for
     help, version, listing, configuration or dry-run output (``pytest --version``,
-    ``mypy --help``, ``cargo test --no-run``, ``npm test -- --help``, ...): such a run is
-    no evidence about the project's tests, build, lint or types.
+    ``mypy --help``, ``cargo test --no-run``, ``npm test -- --help``, ...), and for npm
+    invocations with manager-level tokens after the script name before ``--``. Such a run
+    is no evidence about the project's tests, build, lint or types.
     """
     match = _match(argv)
     if match is None or not _executes_check(match[1], match[2]):

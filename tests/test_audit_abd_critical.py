@@ -6,6 +6,7 @@ not mocks of the failing behaviour.
 
 from __future__ import annotations
 
+import dataclasses
 import http.server
 import json
 import os
@@ -15,6 +16,7 @@ import socketserver
 import subprocess
 import sys
 import threading
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -31,12 +33,13 @@ from agentbodycam.core.forensics import analyze_session, check_signature
 from agentbodycam.core.git_observer import GitObserver
 from agentbodycam.core.recorder import Recorder
 from agentbodycam.core.redact import (
+    HOME_PLACEHOLDER,
     PROJECT_PLACEHOLDER,
     ArgvItemOrigin,
     redact_command,
 )
 from agentbodycam.core.store import EventStore
-from agentbodycam.models.events import EventType
+from agentbodycam.models.events import EventType, JsonObject
 from agentbodycam.utils.git import detect_git, find_git_executable, git_environment
 from command_helpers import run_cli
 from forensics_helpers import CAUSAL_LANGUAGE, SessionBuilder
@@ -66,6 +69,22 @@ def _recorded_origins(event: object) -> list[str]:
     origins = payload.get("argv_item_origins") if isinstance(payload, dict) else None
     assert isinstance(origins, list) and all(isinstance(item, str) for item in origins)
     return list(origins)
+
+
+def _rewrite_command_started(
+    store: EventStore, session_id: str, mutator: Callable[[JsonObject], None]
+) -> None:
+    """Persist in-place mutations to every ``command.started`` payload (for legacy tests)."""
+    path = store.events_path(session_id)
+    lines: list[str] = []
+    for event in store.read_events(session_id):
+        if event.type is EventType.COMMAND_STARTED:
+            payload = dict(event.payload)
+            mutator(payload)
+            event = dataclasses.replace(event, payload=payload)
+        lines.append(event.to_json_line())
+    path.write_bytes(("\n".join(lines) + "\n").encode("utf-8"))
+    store._tails.pop(session_id, None)
 
 
 # -- ABD-001: safe Git discovery for doctor --------------------------------------------------
@@ -318,39 +337,232 @@ def test_abd002_legacy_literal_marker_without_origins_is_ungrouped(project: Path
         False, [sys.executable, f"{PROJECT_PLACEHOLDER}/check.py"], name="command"
     )
     b.stop()
-    # Simulate a pre-provenance command.started: same recorded text, no origins, no rewrite.
-    started.payload.pop("argv_item_origins", None)
-    started.payload["argv_paths_rewritten"] = False
+
+    def drop_origins(payload: JsonObject) -> None:
+        payload.pop("argv_item_origins", None)
+        payload["argv_paths_rewritten"] = False
+
+    _rewrite_command_started(store, b.session_id, drop_origins)
+    started = next(
+        e for e in store.read_events(b.session_id) if e.type is EventType.COMMAND_STARTED
+    )
     assert f"{PROJECT_PLACEHOLDER}/check.py" in _recorded_argv(started)
     assert check_signature("test", "command", started) is None
 
 
-# -- ABD-003: npm optional-script flag variants must not become a passed build ---------------
+def test_abd002_embedded_project_marker_collision_is_not_false_recovery(project: Path) -> None:
+    """CASE 6 — Codex: two different embedded absolute/literal rewrites look identical."""
+    root = str(project.resolve())
+    store = EventStore(project)
+    b = SessionBuilder(store)
+
+    # Different source strings; after redaction both become the same embedded marker text.
+    fail_code = f"import runpy; runpy.run_path('{root}/check.py') # <project>/check.py"
+    pass_code = f"import runpy; runpy.run_path('<project>/check.py') # {root}/check.py"
+    s1, _, failed = b.run_check(False, [sys.executable, "-c", fail_code], name="command")
+    s2, _, _ = b.run_check(True, [sys.executable, "-c", pass_code], name="command")
+    b.stop()
+
+    assert _recorded_argv(s1) == _recorded_argv(s2)
+    assert _recorded_origins(s1)[2] == ArgvItemOrigin.EMBEDDED_PATH.value
+    assert _recorded_origins(s2)[2] == ArgvItemOrigin.EMBEDDED_PATH.value
+    assert check_signature("test", "command", s1) is None
+    assert check_signature("test", "command", s2) is None
+    assert root not in "".join(_recorded_argv(s1))
+
+    report = analyze_session(store, b.session_id)
+    assert report.recoveries.total == 0
+    # Ungrouped failures are not unresolved-by-signature; they remain observable failures.
+    assert report.unresolved_failures.total == 0
+    assert report.command_summary.checks_ungrouped == 2
+    assert report.first_observable_failure is not None
+    assert report.first_observable_failure.event_id == failed.event_id
+    text = render_report(report)
+    assert "observed recovery" not in text.lower()
+    assert str(project.resolve()) not in text
+
+
+def test_abd002_embedded_home_marker_collision_is_not_false_recovery(
+    project: Path, tmp_path: Path
+) -> None:
+    """CASE 7 — embedded ``<home>`` rewrite collisions must not invent a recovery."""
+    home = tmp_path / "home"
+    home.mkdir()
+    home_root = str(home.resolve())
+    fail_red = redact_command(
+        [sys.executable, "-c", f"print('{home_root}/a') # <home>/a"],
+        project_root=project.resolve(),
+        home=home.resolve(),
+    )
+    pass_red = redact_command(
+        [sys.executable, "-c", f"print('<home>/a') # {home_root}/a"],
+        project_root=project.resolve(),
+        home=home.resolve(),
+    )
+    assert fail_red.argv == pass_red.argv
+    assert fail_red.item_origins[2] is ArgvItemOrigin.EMBEDDED_PATH
+    assert HOME_PLACEHOLDER in fail_red.argv[2]
+    assert home_root not in "".join(fail_red.argv)
+
+    store = EventStore(project)
+    b = SessionBuilder(store)
+    _, _, failed = b.run_check(False, ["python", "-c", "pass"], name="command")
+    b.run_check(True, ["python", "-c", "pass"], name="command")
+    b.stop()
+
+    planted = iter((fail_red, pass_red))
+
+    def plant(payload: JsonObject) -> None:
+        red = next(planted)
+        payload["argv"] = list(red.argv)
+        payload["argument_count"] = red.argument_count
+        payload["argv_paths_rewritten"] = red.paths_rewritten
+        payload["argv_item_origins"] = [o.value for o in red.item_origins]
+        payload["executable"] = red.executable
+        payload["argv_redacted"] = red.redacted
+        payload["argv_truncated"] = red.truncated
+
+    _rewrite_command_started(store, b.session_id, plant)
+    events = [e for e in store.read_events(b.session_id) if e.type is EventType.COMMAND_STARTED]
+    assert check_signature("test", "command", events[0]) is None
+    assert check_signature("test", "command", events[1]) is None
+    report = analyze_session(store, b.session_id)
+    assert report.recoveries.total == 0
+    assert report.command_summary.checks_ungrouped == 2
+    assert report.first_observable_failure is not None
+    assert report.first_observable_failure.event_id == failed.event_id
+
+
+def test_abd002_legacy_marker_with_paths_rewritten_still_ungrouped(project: Path) -> None:
+    """CASE 8 — argv_paths_rewritten from argv[0] must not trust reserved markers elsewhere."""
+    store = EventStore(project)
+    b = SessionBuilder(store)
+    abs_python = str(Path(sys.executable).resolve())
+    _, _, failed = b.run_check(
+        False, [abs_python, f"{PROJECT_PLACEHOLDER}/check.py"], name="command"
+    )
+    b.run_check(True, [abs_python, f"{PROJECT_PLACEHOLDER}/check.py"], name="command")
+    b.stop()
+
+    def legacy_trust_trap(payload: JsonObject) -> None:
+        payload.pop("argv_item_origins", None)
+        # Absolute interpreter rewrite sets the command-wide flag; that must not authorize
+        # grouping when a reserved marker also appears in a later argv item.
+        payload["argv_paths_rewritten"] = True
+
+    _rewrite_command_started(store, b.session_id, legacy_trust_trap)
+    events = [e for e in store.read_events(b.session_id) if e.type is EventType.COMMAND_STARTED]
+    assert check_signature("test", "command", events[0]) is None
+    assert check_signature("test", "command", events[1]) is None
+    report = analyze_session(store, b.session_id)
+    assert report.recoveries.total == 0
+    assert report.command_summary.checks_ungrouped == 2
+    assert report.first_observable_failure is not None
+    assert report.first_observable_failure.event_id == failed.event_id
+
+
+@pytest.mark.parametrize(
+    "origins",
+    [
+        None,  # explicit null
+        "literal",  # wrong type
+        ["literal"],  # wrong length
+        ["literal", "not-a-real-origin"],  # unknown value
+    ],
+    ids=["null", "wrong-type", "wrong-length", "unknown"],
+)
+def test_abd002_malformed_origins_are_ungroupable(project: Path, origins: object) -> None:
+    """CASE 9 — malformed argv_item_origins never fall back to permissive identity."""
+    store = EventStore(project)
+    b = SessionBuilder(store)
+    argv = [sys.executable, "check.py"]
+    _, _, failed = b.run_check(False, argv, name="command")
+    b.run_check(True, argv, name="command")
+    b.stop()
+
+    def break_origins(payload: JsonObject) -> None:
+        payload["argv_item_origins"] = origins  # type: ignore[assignment]
+
+    _rewrite_command_started(store, b.session_id, break_origins)
+    events = [e for e in store.read_events(b.session_id) if e.type is EventType.COMMAND_STARTED]
+    assert check_signature("test", "command", events[0]) is None
+    assert check_signature("test", "command", events[1]) is None
+    report = analyze_session(store, b.session_id)
+    assert report.recoveries.total == 0
+    assert report.command_summary.checks_ungrouped == 2
+    assert report.first_observable_failure is not None
+    assert report.first_observable_failure.event_id == failed.event_id
+
+
+def test_abd002_ordinary_legacy_session_without_markers_still_groups(project: Path) -> None:
+    """CASE 10 — legacy recordings with unambiguous relative argv still recover."""
+    store = EventStore(project)
+    b = SessionBuilder(store)
+    argv = [sys.executable, "-c", "pass"]
+    b.run_check(False, argv, name="command")
+    b.run_check(True, argv, name="command")
+    b.stop()
+
+    def drop_origins(payload: JsonObject) -> None:
+        payload.pop("argv_item_origins", None)
+        payload["argv_paths_rewritten"] = False
+
+    _rewrite_command_started(store, b.session_id, drop_origins)
+    events = [e for e in store.read_events(b.session_id) if e.type is EventType.COMMAND_STARTED]
+    assert check_signature("test", "command", events[0]) is not None
+    assert check_signature("test", "command", events[0]) == check_signature(
+        "test", "command", events[1]
+    )
+    report = analyze_session(store, b.session_id)
+    assert report.recoveries.total == 1
+    assert report.unresolved_failures.total == 0
+
+
+# -- ABD-003: npm optional / manager-token forms must not become a passed build --------------
+
+
+# Codex-reproduced npm 11.6.2 missing-script no-op / ambiguous manager-token forms.
+_NPM_MANAGER_TOKEN_FORMS = (
+    "--if-present",
+    "--if-present=true",
+    "--if-present=1",
+    "--if-pres",
+    "--if",
+    "--if-",
+    "--if-p",
+    "-if-present",
+    "-if",
+    "---if-present",
+    "--no-no-if-present",
+)
 
 
 def test_abd003_if_present_is_not_automatic_but_explicit_still_classifies() -> None:
-    for argv in (
-        ["npm", "run", "build", "--if-present"],
-        ["npm", "run", "build", "--if-present=true"],
-        ["npm", "run", "build", "--if-present=1"],
-        ["npm", "run", "build", "--if-pres"],
-        ["pnpm", "run", "--if-present", "build"],
-        ["pnpm", "run", "--if-present=true", "build"],
-        ["cmd", "/c", "npm", "run", "build", "--if-present"],
-        ["cmd", "/c", "npm", "run", "build", "--if-present=true"],
-    ):
+    for flag in _NPM_MANAGER_TOKEN_FORMS:
+        argv = ["npm", "run", "build", flag]
         assert classify_command(argv) is None, argv
         explicit = explicit_classification(CheckKind.BUILD, argv)
         assert explicit.source is ClassificationSource.EXPLICIT
         assert explicit.kind is CheckKind.BUILD
+    for argv in (
+        ["pnpm", "run", "--if-present", "build"],
+        ["pnpm", "run", "--if-present=true", "build"],
+        ["cmd", "/c", "npm", "run", "build", "--if-present"],
+        ["cmd", "/c", "npm", "run", "build", "--if-present=true"],
+        ["npm", "run", "build", "--some-future-npm-option"],
+    ):
+        assert classify_command(argv) is None, argv
 
 
 def test_abd003_npm_double_dash_boundary_does_not_treat_script_arg_as_optional() -> None:
-    argv = ["npm", "run", "build", "--", "--if-present"]
-    result = classify_command(argv)
-    assert result is not None
-    assert result.kind is CheckKind.BUILD
-    assert result.source is ClassificationSource.AUTOMATIC
+    for argv in (
+        ["npm", "run", "build", "--", "--if-present"],
+        ["npm", "run", "build", "--", "--watch"],
+        ["npm", "test", "--", "--watch"],
+    ):
+        result = classify_command(argv)
+        assert result is not None, argv
+        assert result.source is ClassificationSource.AUTOMATIC
 
 
 def test_abd003_pnpm_after_script_if_present_is_not_manager_optional() -> None:
@@ -366,11 +578,8 @@ def test_abd003_yarn_after_script_if_present_is_not_manager_optional() -> None:
 
 
 @requires_npm
-@pytest.mark.parametrize(
-    "flag",
-    ["--if-present", "--if-present=true", "--if-present=1", "--if-pres"],
-)
-def test_abd003_real_npm_if_present_variants_without_build_script_are_not_checks(
+@pytest.mark.parametrize("flag", _NPM_MANAGER_TOKEN_FORMS)
+def test_abd003_real_npm_manager_token_forms_without_build_script_are_not_checks(
     project: Path,
     flag: str,
 ) -> None:
@@ -385,16 +594,17 @@ def test_abd003_real_npm_if_present_variants_without_build_script_are_not_checks
         text=True,
         check=False,
     )
-    assert probe.returncode == 0, (flag, probe.stderr)
+    # Some forms no-op successfully; rejected forms must still never become check.passed.
+    argv = _npm_argv("run", "build", flag)
+    assert classify_command(argv) is None
 
     store = EventStore(project)
     recorder = Recorder(store, record_git=False)
     recorder.start()
     try:
-        argv = _npm_argv("run", "build", flag)
-        assert classify_command(argv) is None
         code, err = run_cli("run", "--project", str(project), "--", *argv)
-        assert code == 0, err
+        # Preserve npm's exit status: success no-op or rejection — never invent a check.
+        assert code == probe.returncode, err
     finally:
         recorder.stop()
 
@@ -404,8 +614,9 @@ def test_abd003_real_npm_if_present_variants_without_build_script_are_not_checks
     assert EventType.COMMAND_FINISHED in types
     assert EventType.CHECK_PASSED not in types
     assert EventType.CHECK_FAILED not in types
-    finished = next(e for e in events if e.type is EventType.COMMAND_FINISHED)
-    assert finished.payload["exit_code"] == 0
+    if probe.returncode == 0:
+        finished = next(e for e in events if e.type is EventType.COMMAND_FINISHED)
+        assert finished.payload["exit_code"] == 0
 
 
 @requires_npm
@@ -443,10 +654,44 @@ def test_abd003_real_npm_build_script_still_becomes_a_check(project: Path) -> No
 
 
 @requires_npm
+def test_abd003_real_npm_test_shorthand_still_becomes_a_check(project: Path) -> None:
+    write(
+        project / "package.json",
+        json.dumps(
+            {
+                "name": "abd003-test",
+                "private": True,
+                "scripts": {"test": 'node -e "process.exit(0)"'},
+            }
+        ),
+    )
+    argv = _npm_argv("test")
+    assert classify_command(argv) is not None
+
+    store = EventStore(project)
+    recorder = Recorder(store, record_git=False)
+    recorder.start()
+    try:
+        code, err = run_cli("run", "--project", str(project), "--", *argv)
+        assert code == 0, err
+    finally:
+        recorder.stop()
+
+    checks = [
+        e
+        for e in store.read_events(recorder.session.session_id)
+        if e.type is EventType.CHECK_PASSED
+    ]
+    assert len(checks) == 1
+    assert checks[0].payload["name"] == "npm test"
+    assert checks[0].payload["classification"] == "automatic"
+
+
+@requires_npm
 def test_abd003_real_npm_double_dash_boundary_with_build_script_still_checks(
     project: Path,
 ) -> None:
-    """``npm run build -- --if-present`` is not npm's optional-script flag."""
+    """``npm run build -- --if-present`` forwards the token to the script, not to npm."""
     write(project / "build.js", "process.exit(0);\n")
     write(
         project / "package.json",

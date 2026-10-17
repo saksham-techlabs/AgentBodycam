@@ -9,8 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Remaining audit blockers ABD-002 and ABD-003 (Task 14C; fixes present pending re-audit;
+- Remaining audit blockers ABD-002 and ABD-003 (Task 14D; conservative forensic semantics;
   ABD-007 and ABD-008 still open; not claiming Codex verification yet):
+  - **ABD-002**: embedded path rewrites (project/home substituted inside a larger argv
+    item) could still collide after redaction and invent a false OBSERVED RECOVERY; legacy
+    events without origins could also group when `argv_paths_rewritten` was set by argv[0]
+    while a reserved marker appeared elsewhere, and malformed `argv_item_origins` fell
+    back to permissive identity. Check identity is now ungroupable for `embedded_path`
+    rewrites, for any malformed/inconsistent provenance metadata, and for legacy argv that
+    contains any reserved redaction marker. Standalone `project_path` and ordinary literal
+    argv remain groupable. Privacy unchanged: no absolute paths, usernames, or path hashes
+    are stored for identity.
+  - **ABD-003**: enumerating npm's optional-script option aliases remained fragile (npm
+    11.6.2 accepts many `--if-present` shapes and unusual forms). Automatic npm
+    classification now accepts only strong canonical shapes (`npm run build`, `npm test`,
+    optionally with `--` plus script arguments). **Any** manager-level token after the
+    recognised script name and before `--` leaves the invocation unclassified. pnpm/yarn
+    keep their existing behaviour; explicit `--check` remains authoritative.
+- Remaining audit blockers ABD-002 and ABD-003 (Task 14C; superseded by Task 14D above for
+  the still-open collisions; ABD-007 and ABD-008 still open):
   - **ABD-002**: a user-typed literal `<project>/…` could collide with an absolute project
     path redacted to the same text, inventing a false OBSERVED RECOVERY. `command.started`
     now records per-item `argv_item_origins` (`literal` / `project_path` /

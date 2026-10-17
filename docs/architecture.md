@@ -347,9 +347,15 @@ child always receives the original argv):
   `literal`, `project_path`, `external_path`, or `embedded_path`. A generated placeholder
   is therefore never indistinguishable from the same characters typed by the user (for
   example a literal directory named `<project>`). Origins never store the original
-  absolute path. Check identity includes these origins when present; older recordings
-  without them stay conservative when a reserved marker appears without rewrite
-  provenance.
+  absolute path. Check identity includes these origins when they are present and valid.
+  An `embedded_path` rewrite (project/home substituted inside a larger argv item) makes
+  the check ungroupable: two different source strings can redact to the same text with
+  the same origin, so AgentBodycam refuses to invent a recovery. Malformed origins
+  (null, wrong type/length, unknown value) never fall back to permissive identity.
+  Older recordings without `argv_item_origins` group only when the recorded argv contains
+  no reserved redaction markers (`<project>`, `<home>`, `<external-path>`, `<redacted>`,
+  `<truncated>`, including as substrings); a command-wide `argv_paths_rewritten` flag is
+  not treated as proof of identity.
 - Bounds: at most 64 items, 256 characters per item, 4096 characters in total; redaction
   happens before truncation. `argv_redacted`, `argv_truncated`, `argv_paths_rewritten`
   and `argv_item_origins` record what happened; `argument_count` is the real number of
@@ -420,20 +426,19 @@ executing the check:
 | `dotnet test` | `-h`, `--help`, `-?`, `/?`, `--list-tests`, `-t` |
 | `dotnet build` | `-h`, `--help`, `-?`, `/?` |
 | npm / pnpm / yarn scripts | `-h`, `--help`, `-?`, `-v`, `-V`, `--version` (the underlying tool is unknown) |
-| npm scripts (manager options before `--`) | optional-script forms that npm accepts for a missing-script no-op: `--if-present`, `--if-present=<value>`, and unique prefixes such as `--if-pres` / `--if`. Tokens after `--` are script arguments and are not treated as this manager flag. |
-| pnpm | `--if-present` / `--if-present=<value>` *before* the script name (`pnpm run --if-present build`) never parse as a known script here, so they stay unclassified. After the script name, pnpm forwards the token to the script — not a manager no-op. |
-| yarn | Yarn classic has no after-script optional no-op equivalent; after-script `--if-present` does not block automatic classification. |
+| npm scripts (canonical only) | Automatic classification accepts only strong canonical shapes: `npm test`, `npm run[ -script] S`, optionally followed by `--` and script arguments. **Any** token after the recognised script name and before an explicit `--` leaves the invocation unclassified (AgentBodycam does not emulate npm's option parser). Tokens after `--` are script arguments and do not block classification. |
+| pnpm | `--if-present` / `--if-present=<value>` *before* the script name (`pnpm run --if-present build`) never parse as a known script here, so they stay unclassified. After the script name, pnpm forwards the token to the script — not a manager no-op; npm's canonical-only rule is not applied blindly to pnpm. |
+| yarn | Yarn classic has no after-script optional no-op equivalent; after-script `--if-present` does not block automatic classification. npm's canonical-only rule is not applied blindly to yarn. |
 
 The reason is a forensic invariant: `pytest --version` or `mypy --version` exiting 0 says
 nothing about the project's tests or types, so it must never become a `check.passed` that
 a future forensic engine could read as "the test suite passed" or "type checking passed".
-Likewise npm's optional-script flag family (`npm run build --if-present`,
-`--if-present=true`, `--if-present=1`, `--if-pres`, …) must not become an automatic passed
-build when no build script exists. Explicit `--check KIND` still classifies such an
-invocation if the user insisted; automatic classification does not. For help/version
-flags, matching is exact per argument; a flag's *value* (`pytest -k version`) is not a
-flag. For npm's optional-script option, name/value forms and accepted abbreviations are
-recognised without implementing a full npm parser.
+Likewise ambiguous npm manager-level tokens (`npm run build --if-present`, value forms,
+abbreviations, future options, …) must not become an automatic passed build when execution
+semantics are uncertain. Explicit `--check KIND` still classifies such an invocation if
+the user insisted; automatic classification does not. For help/version flags, matching is
+exact per argument; a flag's *value* (`pytest -k version`) is not a flag. For npm,
+false negatives are acceptable; false PASS evidence is not.
 
 **Explicit shell wrappers** are looked through, for classification only (argv passed to
 the child is never changed, and no shell is ever added): `cmd [/d] [/q] [/s] /c <command>`
@@ -866,15 +871,18 @@ Only evidence already stored is used; the original process argv is never involve
 gets **no signature** (it is "ungrouped": it still counts as an observable failure and
 appears in final states, but takes part in no retry/recovery/unresolved finding, and an
 info note says so) when its paired `command.started` lacks these fields or its recorded
-argv is lossy: `argv_truncated`, `argv_redacted`, `argument_count` not matching, or an
-argument after the program rewritten to `<external-path>` (two different paths would look
-identical). The program itself (`argv[0]`) is accepted when it was rewritten to
-`<external-path>` because absolute interpreter paths always are; the recorded executable
-file name stands in for it. Absolute project paths are recorded as `<project>/...` with
-origin `project_path`, so they cannot collapse with a relative `check.py` or with a
-user-typed literal `<project>/check.py` (origin `literal`). Older recordings without
-`argv_item_origins` stay conservative when a reserved marker appears without rewrite
-provenance. So `pytest tests/auth` and `pytest tests/billing`, or the same argv in two
+argv cannot safely identify the invocation: `argv_truncated`, `argv_redacted`,
+`argument_count` not matching, an argument after the program rewritten to
+`<external-path>`, an `embedded_path` rewrite inside a larger argv item, or
+`argv_item_origins` that is present but malformed/inconsistent. The program itself
+(`argv[0]`) is accepted when it was rewritten to `<external-path>` because absolute
+interpreter paths always are; the recorded executable file name stands in for it.
+Standalone absolute project paths are recorded as `<project>/...` with origin
+`project_path`, so they cannot collapse with a relative `check.py` or with a user-typed
+literal `<project>/check.py` (origin `literal`). Older recordings without
+`argv_item_origins` group only when the recorded argv contains no reserved redaction
+markers at all (including as substrings); `argv_paths_rewritten` alone is never treated
+as proof. So `pytest tests/auth` and `pytest tests/billing`, or the same argv in two
 working directories, are different checks; missing a recovery is preferred over inventing
 one. When several signatures share a name, `display_name` adds the first 8 hex characters
 (`pytest [2221cf76]`).

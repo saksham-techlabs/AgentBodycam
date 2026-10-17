@@ -189,7 +189,15 @@ INFORMATIONAL = [
     "npm run build --if-present=1",
     "npm run build --if-pres",
     "npm run build --if",
+    "npm run build --if-",
+    "npm run build --if-p",
+    "npm run build -if-present",
+    "npm run build -if",
+    "npm run build ---if-present",
+    "npm run build --no-no-if-present",
+    "npm run build --some-future-npm-option",
     "npm run-script test --if-present",
+    "npm test --watch",
     "pnpm test -- --help",
     "pnpm lint -- --help",
     "pnpm run typecheck -- -h",
@@ -289,16 +297,27 @@ def test_explicit_check_still_classifies_if_present_package_scripts() -> None:
         "--if-pres",
         "--if-prese",
         "--if",
+        "--if-",
+        "--if-p",
+        "-if-present",
+        "-if",
+        "---if-present",
+        "--no-no-if-present",
+        "--some-future-npm-option",
+        "--silent",
     ],
 )
-def test_npm_if_present_value_and_abbreviation_forms_are_not_automatic(flag: str) -> None:
+def test_npm_manager_level_tokens_before_boundary_are_not_automatic(flag: str) -> None:
+    """Any npm-level token after the script and before ``--`` blocks auto-classification."""
     assert classify_command(["npm", "run", "build", flag]) is None
     assert classify_command(["cmd", "/c", "npm", "run", "build", flag]) is None
 
 
-def test_npm_if_present_after_double_dash_is_script_argument_not_optional() -> None:
-    """``npm run build -- --if-present`` passes the flag to the script, not to npm."""
+def test_npm_script_args_after_double_dash_remain_automatic() -> None:
+    """Tokens after ``--`` are script arguments; canonical npm forms stay classified."""
     assert auto("npm run build -- --if-present") == (BUILD, "npm build")
+    assert auto("npm run build -- --watch") == (BUILD, "npm build")
+    assert auto("npm test -- --watch") == (TEST, "npm test")
     assert classify_command(["npm", "run", "build", "--if-present"]) is None
 
 
@@ -507,7 +526,9 @@ def test_explicit_names_for_unrecognised_commands(argv: list[str], name: str) ->
         ["pytest", "--token", HIDDEN],
         ["python", "-m", "pytest", f"--api-key={HIDDEN}", f"/home/someone/{HIDDEN}"],
         ["cmd", "/c", "npm", "test", "--", f"password={HIDDEN}"],
-        ["npm", "run", "build", f"https://bob:{HIDDEN}@example.com"],
+        # Secret after ``--`` is a script argument; manager-level tokens before ``--``
+        # would leave automatic classification empty under the canonical-only npm rule.
+        ["npm", "run", "build", "--", f"https://bob:{HIDDEN}@example.com"],
         ["eslint", f"C:\\Users\\someone\\{HIDDEN}"],
     ],
 )
