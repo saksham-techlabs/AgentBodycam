@@ -630,7 +630,9 @@ repository produces no events. The first snapshot after the session starts is al
 recorded (if the project is in a repository). A project that is not in a repository
 produces no Git events; if it later becomes one (`git init`), a snapshot is recorded, and
 if a recorded repository disappears a `{"repository": false, "reason": ...}` snapshot is
-recorded once.
+recorded once. A `.git` *file* that is malformed or whose `gitdir:` target is missing is
+treated as not a repository (same silence), not as a Git command failure — Git versions
+differ in the exact stderr wording for that discovery failure.
 
 **Snapshot payload** (`type: git.snapshot`, `source: git`, `path: null`):
 

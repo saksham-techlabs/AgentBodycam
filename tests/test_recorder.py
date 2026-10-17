@@ -10,7 +10,13 @@ from pathlib import Path
 
 import pytest
 
-from agentbodycam.core.recorder import Recorder, RecorderError, StopReason, stop_on_signals
+from agentbodycam.core.recorder import (
+    GitStatus,
+    Recorder,
+    RecorderError,
+    StopReason,
+    stop_on_signals,
+)
 from agentbodycam.core.store import EventStore
 from agentbodycam.models.events import Event, EventSource, EventType, EvidenceKind
 from agentbodycam.models.session import SessionStatus
@@ -368,9 +374,29 @@ def test_ignored_locations_produce_no_events(
     assert all(not p.startswith(relative.split("/")[0]) for p in recorder.snapshot)
 
 
-def test_git_worktree_file_is_ignored(project: Path, recorder: Recorder) -> None:
-    write(project / ".git", "gitdir: ../elsewhere\n")
-    assert recorder.scan_once() == []
+@pytest.mark.parametrize(
+    "contents",
+    [
+        "gitdir: ../elsewhere\n",
+        "not-a-gitdir-line\n",
+    ],
+)
+def test_git_worktree_file_is_ignored(project: Path, recorder: Recorder, contents: str) -> None:
+    """A `.git` worktree pointer is ignored by the file scanner and is not a Git error.
+
+    Malformed or dangling ``gitdir:`` targets are discovery failures (not a repository),
+    not ``error.observed``. File recording of other paths must still work.
+    """
+    write(project / ".git", contents)
+    events = recorder.scan_once()
+    assert events == []
+    assert file_events(events) == []
+    assert recorder.git_status is GitStatus.NOT_A_REPOSITORY
+    assert ".git" not in recorder.snapshot
+    write(project / "tracked.txt", "hello")
+    created = recorder.scan_once()
+    assert file_events(created) == [("file.created", "tracked.txt")]
+    assert all(e.type is not EventType.ERROR_OBSERVED for e in created)
 
 
 @pytest.mark.parametrize(

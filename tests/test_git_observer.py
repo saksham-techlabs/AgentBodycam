@@ -11,11 +11,12 @@ from agentbodycam.core.git_observer import (
     GitObserver,
     GitState,
     GitUnavailable,
+    _stderr_indicates_not_a_repository,
     describe_snapshot,
     unavailable_payload,
 )
 from agentbodycam.models.events import dumps_canonical
-from agentbodycam.utils.git import find_git_executable, git_environment
+from agentbodycam.utils.git import GitResult, find_git_executable, git_environment
 from git_helpers import GIT, commit_all, git, git_dir_state, head, init_repo, requires_git
 from recording_helpers import write
 
@@ -49,6 +50,59 @@ def test_non_git_project_is_unavailable(project: Path) -> None:
     observation = observer(project).observe()
     assert observation.unavailable is GitUnavailable.NOT_A_REPOSITORY
     assert observation.state is None and observation.problem is None
+
+
+def test_malformed_gitfile_is_not_a_repository(project: Path) -> None:
+    write(project / ".git", "not-a-gitdir-line\n")
+    observation = observer(project).observe()
+    assert observation.unavailable is GitUnavailable.NOT_A_REPOSITORY
+    assert observation.problem is None
+
+
+def test_missing_gitdir_target_is_not_a_repository(project: Path) -> None:
+    write(project / ".git", "gitdir: ../elsewhere\n")
+    observation = observer(project).observe()
+    assert observation.unavailable is GitUnavailable.NOT_A_REPOSITORY
+    assert observation.problem is None
+
+
+@pytest.mark.parametrize(
+    "stderr",
+    [
+        "fatal: not a git repository (or any of the parent directories): .git\n",
+        "fatal: not a git repository: (NULL)\n",
+        "fatal: gitfile does not point to a valid repository: /tmp/proj/.git\n",
+        "fatal: invalid gitfile format: /tmp/proj/.git\n",
+    ],
+)
+def test_discovery_stderr_variants_mean_not_a_repository(
+    project: Path, monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    """CI-era and current Git wording for the same discovery failure must agree."""
+    write(project / ".git", "gitdir: ../elsewhere\n")
+    obs = observer(project)
+
+    def fake_run(operation: str, args: list[str], *, status: bool = False) -> GitResult:
+        return GitResult(returncode=128, stdout=b"", stderr=stderr.encode())
+
+    monkeypatch.setattr(obs, "_run", fake_run)
+    observation = obs.observe()
+    assert observation.unavailable is GitUnavailable.NOT_A_REPOSITORY
+    assert observation.problem is None
+
+
+@pytest.mark.parametrize(
+    ("stderr", "expected"),
+    [
+        ("fatal: not a git repository: .git\n", True),
+        ("fatal: gitfile does not point to a valid repository: x/.git\n", True),
+        ("fatal: invalid gitfile format: x/.git\n", True),
+        ("error: bad index file\nfatal: index file smaller than expected\n", False),
+        ("fatal: detected dubious ownership in repository at '/tmp/x'\n", False),
+    ],
+)
+def test_not_a_repository_stderr_classifier(stderr: str, expected: bool) -> None:
+    assert _stderr_indicates_not_a_repository(stderr) is expected
 
 
 def test_git_executable_missing() -> None:

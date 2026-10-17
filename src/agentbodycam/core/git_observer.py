@@ -276,7 +276,7 @@ class GitObserver:
         if result.returncode == 0:
             return result
         message = result.stderr.decode("utf-8", "replace")
-        if "not a git repository" in message.casefold():
+        if _stderr_indicates_not_a_repository(message):
             raise _NotARepository
         raise _Failed(
             GitProblem(
@@ -537,6 +537,23 @@ class GitObserver:
             commits.append({"commit": sha, "subject": clean[:MAX_SUBJECT_CHARS]})
         truncated = len(commits) > MAX_COMMITS_LISTED
         return commits[:MAX_COMMITS_LISTED], truncated
+
+
+def _stderr_indicates_not_a_repository(message: str) -> bool:
+    """True when Git stderr means no usable repository was discovered.
+
+    Git versions differ for the same discovery failure (ordinary non-Git directory,
+    malformed ``.git`` gitfile, or ``gitdir:`` pointing at a missing target). We force
+    ``LC_ALL=C`` on every command, so these English phrases stay stable; matching stays
+    narrow so genuine command failures (corrupt index, dubious ownership, …) still become
+    ``error.observed``.
+    """
+    lower = message.casefold()
+    return (
+        "not a git repository" in lower
+        or "gitfile does not point to a valid repository" in lower
+        or "invalid gitfile format" in lower
+    )
 
 
 def _resolve(path: Path) -> Path:
