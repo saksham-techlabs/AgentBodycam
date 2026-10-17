@@ -37,7 +37,14 @@ LISTENING = re.compile(r"^Listening: http://127\.0\.0\.1:(\d+)$")
 SESSION_ID = re.compile(r"\d{8}T\d{6}Z-[0-9a-f]{16}")
 
 WHEEL_PACKAGE_SUFFIXES = {".py", ".typed", ".html", ".js", ".css", ".svg"}
-WHEEL_DIST_INFO = {"METADATA", "WHEEL", "entry_points.txt", "RECORD", "licenses/LICENSE"}
+WHEEL_DIST_INFO = {
+    "METADATA",
+    "WHEEL",
+    "entry_points.txt",
+    "RECORD",
+    "licenses/LICENSE",
+    "licenses/THIRD_PARTY_NOTICES.md",
+}
 SDIST_TOP_LEVEL = {
     ".editorconfig",
     ".gitattributes",
@@ -48,6 +55,7 @@ SDIST_TOP_LEVEL = {
     "PKG-INFO",
     "README.md",
     "SECURITY.md",
+    "THIRD_PARTY_NOTICES.md",
     "docs",
     "examples",
     "pyproject.toml",
@@ -61,6 +69,7 @@ SDIST_REQUIRED = {
     "PKG-INFO",
     "README.md",
     "LICENSE",
+    "THIRD_PARTY_NOTICES.md",
     "src/agentbodycam/__init__.py",
     "src/agentbodycam/py.typed",
     "src/agentbodycam/ui/static/index.html",
@@ -72,6 +81,13 @@ SDIST_REQUIRED = {
     "web/index.html",
     "web/src/main.tsx",
 }
+THIRD_PARTY_NOTICE_MARKERS = (
+    b"react",
+    b"react-dom",
+    b"scheduler",
+    b"Copyright (c) Meta Platforms, Inc. and affiliates.",
+    b"MIT License",
+)
 FORBIDDEN_PARTS = {
     ".git",
     ".agentbodycam",
@@ -203,8 +219,12 @@ def test_metadata_is_consistent(artifacts: Artifacts) -> None:
     assert metadata["Version"] == VERSION
     assert metadata["Requires-Python"] == project["requires-python"] == ">=3.11"
     assert metadata["License-Expression"] == "MIT"
-    assert metadata.get_all("License-File") == ["LICENSE"]
+    assert metadata.get_all("License-File") == ["LICENSE", "THIRD_PARTY_NOTICES.md"]
     assert files[f"{DIST_INFO}/licenses/LICENSE"] == (ROOT / "LICENSE").read_bytes()
+    assert (
+        files[f"{DIST_INFO}/licenses/THIRD_PARTY_NOTICES.md"]
+        == (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes()
+    )
     assert metadata["Description-Content-Type"] == "text/markdown"
     description = files[f"{DIST_INFO}/METADATA"].split(b"\n\n", 1)[1].decode("utf-8")
     assert description == (ROOT / "README.md").read_text(encoding="utf-8")
@@ -227,6 +247,47 @@ def test_web_ui_version_matches_the_python_package() -> None:
     web = json.loads((ROOT / "web" / "package.json").read_text(encoding="utf-8"))
     lock = json.loads((ROOT / "web" / "package-lock.json").read_text(encoding="utf-8"))
     assert web["version"] == lock["version"] == lock["packages"][""]["version"] == VERSION
+
+
+def _assert_third_party_notices(body: bytes) -> None:
+    """Bundled Replay UI runtime attribution must name React, ReactDOM and Scheduler."""
+    lowered = body.lower()
+    assert b"react" in lowered and b"react-dom" in lowered and b"scheduler" in lowered
+    for marker in THIRD_PARTY_NOTICE_MARKERS:
+        assert marker in body, marker
+    # AgentBodycam stays MIT; do not claim the Meta packages are AgentBodycam's own license.
+    assert b"AgentBodycam" in body or b"agentbodycam" in lowered
+    assert b"Meta Platforms" in body
+
+
+def test_third_party_notices_ship_in_wheel_and_sdist(artifacts: Artifacts) -> None:
+    """ABD-005: bundled frontend runtime notices travel with both release artifacts."""
+    notices = (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes()
+    _assert_third_party_notices(notices)
+    wheel = _wheel_files(artifacts.wheel)
+    assert wheel[f"{DIST_INFO}/licenses/THIRD_PARTY_NOTICES.md"] == notices
+    sdist = _sdist_files(artifacts.sdist)
+    assert sdist[f"{SDIST_PREFIX}THIRD_PARTY_NOTICES.md"] == notices
+    metadata = email.message_from_bytes(wheel[f"{DIST_INFO}/METADATA"])
+    assert metadata["License-Expression"] == "MIT"
+    assert "THIRD_PARTY_NOTICES.md" in (metadata.get_all("License-File") or [])
+
+
+def test_third_party_notices_survive_wheel_from_sdist(artifacts: Artifacts, tmp_path: Path) -> None:
+    """A wheel rebuilt from the sdist must still carry the notices (no node_modules needed)."""
+    with tarfile.open(artifacts.sdist) as tf:
+        tf.extractall(tmp_path / "unpacked", filter="data")
+    source = tmp_path / "unpacked" / SDIST_PREFIX.rstrip("/")
+    assert (source / "THIRD_PARTY_NOTICES.md").is_file()
+    assert not (source / "web" / "node_modules").exists()
+    out = tmp_path / "out"
+    out.mkdir()
+    with contextlib.chdir(source):
+        wheel = out / hatchling_build.build_wheel(str(out))
+    rebuilt = _wheel_files(wheel)
+    notices = rebuilt[f"{DIST_INFO}/licenses/THIRD_PARTY_NOTICES.md"]
+    _assert_third_party_notices(notices)
+    assert notices == (ROOT / "THIRD_PARTY_NOTICES.md").read_bytes()
 
 
 # -- wheel contents --------------------------------------------------------------------------

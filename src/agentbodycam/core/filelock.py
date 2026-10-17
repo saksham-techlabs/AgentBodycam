@@ -99,6 +99,15 @@ def open_lock_file(path: Path, *, create: bool) -> int:
             or (opened.st_dev, opened.st_ino) != (listed.st_dev, listed.st_ino)
         ):
             raise UnsafeLockFileError(f"lock file changed while it was being opened: {path}")
+        # Owner-only on POSIX so lock files cannot become 0644 under a permissive umask.
+        if os.name == "posix" and stat.S_IMODE(opened.st_mode) != 0o600:
+            fchmod = getattr(os, "fchmod", None)
+            if fchmod is None:
+                raise UnsafeLockFileError(f"fchmod is required for lock file permissions: {path}")
+            fchmod(fd, 0o600)
+            opened = os.fstat(fd)
+            if stat.S_IMODE(opened.st_mode) != 0o600:
+                raise UnsafeLockFileError(f"cannot set owner-only permissions on lock file: {path}")
     except BaseException:
         os.close(fd)
         raise

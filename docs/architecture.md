@@ -685,6 +685,17 @@ Code: `models/events.py`, `models/session.py`, `core/store.py`.
 `.agentbodycam/` is in the recorder's ignore list and excluded from Git status, so lock and
 metadata files never become file or Git evidence.
 
+**Store permissions.** Session data is still stored **unencrypted** on disk; treat
+recordings as sensitive. On POSIX, AgentBodycam creates and hardens its own verified
+store nodes as owner-only (directories `0700`, files `0600`, including
+`.agentbodycam/`, `sessions/`, per-session directories, `locks/`, `events.jsonl`,
+`session.json`, `active.json`, lock files and `.gitignore`), without relying on the
+process umask and without following symlinks. The project root and paths outside
+`.agentbodycam` are never chmod'd. On Windows, mode bits are not used as an
+access-control mechanism; local file access remains governed by Windows ACLs inherited
+from the user's filesystem/project environment. Same-user processes remain inside the
+trust boundary on every platform.
+
 **Session** (`session.json`, `schema_version` 1): `session_id`, `project_root` (absolute),
 `started_at` / `ended_at` (UTC), `status` (`created` | `recording` | `stopped`),
 `agentbodycam_version`, and `platform` (OS name/release, machine, Python version and
@@ -1453,11 +1464,14 @@ The CLI is built on the standard library `argparse` to keep the runtime dependen
 footprint at zero. That choice can be revisited if the command surface grows substantially.
 
 **Packaging.** Hatchling builds a pure-Python `py3-none-any` wheel containing only
-`agentbodycam/` (Python modules, `py.typed`, the built UI in `ui/static/`) plus metadata
-and the license; the version comes from `agentbodycam.__version__`. The sdist is an
-explicit allowlist (sources, tests, scripts, docs, the `web/` sources and lockfile, the
-top-level documents and `pyproject.toml`), with `.gitignore` exclusions applied on top,
-so untracked local files cannot leak into it. Builds are byte-for-byte reproducible
+`agentbodycam/` (Python modules, `py.typed`, the built UI in `ui/static/`) plus metadata,
+AgentBodycam's MIT `LICENSE`, and `THIRD_PARTY_NOTICES.md` (attribution for bundled Replay
+UI runtime code from React, ReactDOM and Scheduler). AgentBodycam itself remains MIT; the
+notices file does not re-license those packages as AgentBodycam's own work. The version
+comes from `agentbodycam.__version__`. The sdist is an explicit allowlist (sources, tests,
+scripts, docs, the `web/` sources and lockfile, the top-level documents including
+`THIRD_PARTY_NOTICES.md`, and `pyproject.toml`), with `.gitignore` exclusions applied on
+top, so untracked local files cannot leak into it. Builds are byte-for-byte reproducible
 (hatchling uses fixed archive timestamps) and a wheel built from the sdist is identical
 to one built from the checkout. `tests/test_packaging.py` checks all of this and runs the
 installed wheel from a fresh virtual environment without Node.js, Git or the checkout.

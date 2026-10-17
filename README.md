@@ -570,8 +570,10 @@ as stale, never as active.
 
 Sessions live in `.agentbodycam/sessions/<session-id>/` (`session.json` + `events.jsonl`).
 AgentBodycam writes a `.agentbodycam/.gitignore` so recordings are never committed.
-See [docs/architecture.md](docs/architecture.md#32-evidence--event-store-implemented)
-for the event schema.
+On POSIX, that store is created and kept owner-only (`0700` / `0600`); on Windows, access
+follows the project's filesystem ACLs. Recordings are still **unencrypted** — treat them
+as sensitive. See [docs/architecture.md](docs/architecture.md#32-evidence--event-store-implemented)
+for the event schema and [SECURITY.md](SECURITY.md) for the threat model.
 
 ## Development
 
@@ -614,4 +616,7 @@ AgentBodycam is intended to handle sensitive project data locally. See
 
 ## License
 
-[MIT](LICENSE)
+AgentBodycam is [MIT](LICENSE). The Replay UI wheel also bundles React, ReactDOM and
+Scheduler; their copyright notices and MIT license text ship in
+[THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md) (included in both the wheel and the
+sdist).

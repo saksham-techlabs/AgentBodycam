@@ -40,6 +40,16 @@ inside `<project>/.agentbodycam/` (`analyze`, `replay-api` and `replay` write no
   commits it brought in (at most 20). No diffs, patches, commit bodies, author names or
   emails, remote URLs, `.git/config` contents, credentials or environment variables.
 
+**Store permissions (not encryption).** Session data under `.agentbodycam/` is still
+**unencrypted**. Treat recordings as sensitive. On POSIX, AgentBodycam creates and hardens
+its own store directories to mode `0700` and regular store files (`session.json`,
+`events.jsonl`, `.gitignore`, lock files, `active.json`, …) to mode `0600`, so other local
+accounts cannot read them when parent directories are traversable. The project root and
+paths outside `.agentbodycam/` are never chmod'd. On Windows, local file access remains
+governed by Windows ACLs inherited from the user's filesystem/project environment;
+AgentBodycam does not install a separate ACL subsystem. Same-user processes remain inside
+the trust boundary on every platform.
+
 How Git is read:
 
 - Only read-only commands are run: `git rev-parse`, `git status --porcelain=v2`,
@@ -149,10 +159,11 @@ Communication with it is **local IPC over the loopback interface**, not network 
   messages: no paths, tracebacks or exception text. The default HTTP access log is
   disabled; the terminal shows only the method, route template and status of each request
   (never the raw path, query string, session ID or headers).
-- The token keeps out web pages and other local users' programs that do not have it. It
-  cannot protect against programs running as your own user account, which can read
-  `.agentbodycam/` directly anyway. Data leaves your machine only if you deliberately share
-  it.
+- The token keeps out web pages and programs that do not have it. It cannot protect against
+  programs running as your own user account, which can read `.agentbodycam/` directly.
+  On POSIX, other local users are blocked from reading the store by owner-only directory
+  and file modes (see above); that is separate from this token. Data leaves your machine
+  only if you deliberately share it.
 
 ## Local Replay UI (`agentbodycam replay`)
 
@@ -211,12 +222,16 @@ authentication on `/api` routes is unchanged.
   foreign `Origin`/`Host` headers (including DNS rebinding) are refused.
 - *Programs running as your own user* can already read `.agentbodycam/` directly; the UI
   does not change that.
-- *Other local users or programs that can connect to the loopback port* are the trade-off.
-  Unlike `replay-api` (whose token appears only in your terminal), anyone who can reach the
-  port and deliberately forge the request headers above can obtain the token while
-  `replay` is running. Only use `replay` on a machine where you trust the other local
-  accounts, or use `replay-api`, which offers no bootstrap. The server never listens
-  beyond loopback, so other machines cannot reach it.
+- *Other local users reading `.agentbodycam/` on disk*: on POSIX, owner-only store modes
+  block direct filesystem reads by other accounts. On Windows, access depends on ACLs.
+  That filesystem boundary is separate from the Replay UI.
+- *Other local users or programs that can connect to the loopback port* remain the
+  bootstrap trade-off for `replay`. Unlike `replay-api` (whose token appears only in your
+  terminal), anyone who can reach the port and deliberately forge the request headers
+  above can obtain the token while `replay` is running. Only use `replay` on a machine
+  where you trust other local accounts for loopback access, or use `replay-api`, which
+  offers no bootstrap. The server never listens beyond loopback, so other machines cannot
+  reach it.
 
 ## Local exports (SVG share card, JSON summary, WebM replay clip)
 
@@ -268,21 +283,26 @@ In scope:
 Out of scope (AgentBodycam cannot defend against them):
 
 - Programs or people running as your own user account: they can read `.agentbodycam/`
-  and your project directly. With `agentbodycam replay` running, other local accounts that
-  can reach the loopback port can also obtain the token (see above).
+  and your project directly.
+- With `agentbodycam replay` running, other local accounts that can reach the loopback
+  port can obtain the token via the documented bootstrap trade-off (see above). That is
+  separate from POSIX owner-only store modes, which block other users' direct reads of
+  `.agentbodycam/` on disk.
 - A compromised machine, browser or Python installation.
 - Secrets typed in a form the redaction patterns do not recognise (for example a short
   password after an unrecognised flag such as `-p`). Avoid secrets on command lines.
 
 ## Known limitations
 
-- Session data under `.agentbodycam/` is stored unencrypted and includes the absolute
-  project path (which can contain your user name) and file SHA-256 hashes.
+- Session data under `.agentbodycam/` is stored **unencrypted** and includes the absolute
+  project path (which can contain your user name) and file SHA-256 hashes. POSIX
+  owner-only modes and Windows ACLs are access control, not encryption.
 - Redaction is pattern-based and conservative, not a guarantee.
 - The Replay server re-reads a session's whole event log for every timeline page and
   report request, so very large sessions (tens of thousands of events) respond slowly.
   This is a performance limitation, not a security issue.
-- No release has been made and no independent security audit has taken place yet.
+- No release has been made. An independent audit tracked findings ABD-001 … ABD-008;
+  ABD-001 … ABD-006 are addressed in-tree, ABD-007 and ABD-008 remain open.
 
 ## Automated checks
 

@@ -12,9 +12,13 @@ Layout, relative to the project root::
           events.jsonl        one canonical JSON event per line, append-only
 
 Every path the store writes to is checked to be a real (non-symlinked) location inside
-``<project>/.agentbodycam``. Any number of threads and processes may append to the same
-session: each append holds the session's event lock while it revalidates the log tail,
-assigns the next sequence number and writes one line.
+``<project>/.agentbodycam``. On POSIX, AgentBodycam-managed store directories are created
+and hardened to mode ``0700`` and regular store files to ``0600`` (owner-only), independent
+of the process umask; this is access control via permissions, not encryption. On Windows,
+local access continues to follow the filesystem ACLs of the project directory. Any number
+of threads and processes may append to the same session: each append holds the session's
+event lock while it revalidates the log tail, assigns the next sequence number and writes
+one line.
 
 Live-recording producers use :meth:`EventStore.append_recording_event`, which checks that
 the session is ``recording`` while holding that same lock, and the recorder closes a session
@@ -29,6 +33,7 @@ import contextlib
 import json
 import os
 import secrets
+import stat
 import sys
 import tempfile
 import threading
@@ -69,6 +74,13 @@ GITIGNORE_FILENAME = ".gitignore"
 GITIGNORE_CONTENT = (
     "# Created by AgentBodycam. Session recordings are local and must not be committed.\n*\n"
 )
+
+# POSIX owner-only modes for AgentBodycam-managed store nodes. Creation requests these
+# modes and then fchmod/chmod to the same value so a permissive umask cannot leave
+# evidence group/world-readable. Windows ACLs are unchanged (mode bits are not security).
+STORE_DIR_MODE = 0o700
+STORE_FILE_MODE = 0o600
+_POSIX_STORE_MODES = os.name == "posix"
 
 _CREATE_ATTEMPTS = 5
 # Windows refuses to replace a file another process has open for an instant (e.g. a
@@ -180,15 +192,113 @@ def strict_json_loads(text: str) -> object:
     )
 
 
+def _open_nofollow_flags(*extra: int) -> int:
+    flags = 0
+    for name in ("O_NOFOLLOW", "O_CLOEXEC", "O_BINARY", "O_NOINHERIT"):
+        flags |= getattr(os, name, 0)
+    for value in extra:
+        flags |= value
+    return flags
+
+
+def _fchmod(fd: int, mode: int) -> None:
+    """Set mode on an open FD. No-op on Windows (``os.fchmod`` is POSIX-only)."""
+    if not _POSIX_STORE_MODES:
+        return
+    # ``os.fchmod`` is missing from Windows stdlib stubs; look it up dynamically.
+    fchmod = getattr(os, "fchmod", None)
+    if fchmod is None:
+        raise StoreError("fchmod is required to harden store permissions on POSIX")
+    fchmod(fd, mode)
+
+
+def harden_store_node(path: Path, *, want_dir: bool) -> None:
+    """Tighten a verified AgentBodycam store node to owner-only modes on POSIX.
+
+    No-op on Windows. Callers must already have rejected symlinks/junctions and confirmed
+    ``path`` is inside the store. Uses ``O_NOFOLLOW`` + ``fchmod`` where available so the
+    mode change applies to the opened inode, not a swapped path.
+    """
+    if not _POSIX_STORE_MODES:
+        return
+    desired = STORE_DIR_MODE if want_dir else STORE_FILE_MODE
+    flags = _open_nofollow_flags(os.O_RDONLY)
+    if want_dir:
+        flags |= getattr(os, "O_DIRECTORY", 0)
+    try:
+        fd = os.open(path, flags)
+    except OSError as exc:
+        raise StoreError(f"cannot open store path to set permissions: {path}") from exc
+    try:
+        st = os.fstat(fd)
+        if want_dir and not stat.S_ISDIR(st.st_mode):
+            raise UnsafePathError(f"expected a directory: {path}")
+        if not want_dir and not stat.S_ISREG(st.st_mode):
+            raise UnsafePathError(f"expected a regular file: {path}")
+        if stat.S_IMODE(st.st_mode) == desired:
+            return
+        try:
+            _fchmod(fd, desired)
+        except OSError as exc:
+            raise StoreError(
+                f"refusing to use store path with insecure permissions "
+                f"({oct(stat.S_IMODE(st.st_mode))}): cannot harden {path}"
+            ) from exc
+        after = stat.S_IMODE(os.fstat(fd).st_mode)
+        if after != desired:
+            raise StoreError(
+                f"refusing to use store path with insecure permissions ({oct(after)}): {path}"
+            )
+    finally:
+        os.close(fd)
+
+
+def secure_create_file(path: Path) -> None:
+    """Create an empty regular file with owner-only permissions (``O_EXCL``, no follow)."""
+    flags = _open_nofollow_flags(os.O_WRONLY, os.O_CREAT, os.O_EXCL)
+    fd = os.open(path, flags, STORE_FILE_MODE)
+    try:
+        _fchmod(fd, STORE_FILE_MODE)
+    finally:
+        os.close(fd)
+
+
+def open_store_file_append(path: Path) -> int:
+    """Open an existing store file for append; harden to owner-only on POSIX."""
+    flags = _open_nofollow_flags(os.O_WRONLY, os.O_APPEND)
+    fd = os.open(path, flags)
+    try:
+        st = os.fstat(fd)
+        if not stat.S_ISREG(st.st_mode):
+            raise UnsafePathError(f"expected a regular file: {path}")
+        if _POSIX_STORE_MODES and stat.S_IMODE(st.st_mode) != STORE_FILE_MODE:
+            try:
+                _fchmod(fd, STORE_FILE_MODE)
+            except OSError as exc:
+                raise StoreError(
+                    f"refusing to use store path with insecure permissions "
+                    f"({oct(stat.S_IMODE(st.st_mode))}): cannot harden {path}"
+                ) from exc
+            if stat.S_IMODE(os.fstat(fd).st_mode) != STORE_FILE_MODE:
+                raise StoreError(f"refusing to use store path with insecure permissions: {path}")
+    except BaseException:
+        os.close(fd)
+        raise
+    return fd
+
+
 def atomic_write_text(path: Path, text: str) -> None:
     fd, tmp_name = tempfile.mkstemp(prefix=f".{path.name}.", suffix=".tmp", dir=path.parent)
     tmp = Path(tmp_name)
     try:
+        _fchmod(fd, STORE_FILE_MODE)
         with os.fdopen(fd, "wb") as fh:
             fh.write(text.encode("utf-8"))
             fh.flush()
             os.fsync(fh.fileno())
         _replace(tmp, path)
+        if _POSIX_STORE_MODES:
+            harden_store_node(path, want_dir=False)
     except BaseException:
         tmp.unlink(missing_ok=True)
         raise
@@ -279,7 +389,11 @@ class EventStore:
     # -- path safety -----------------------------------------------------------------
 
     def _check_real(self, path: Path, *, want_dir: bool) -> Path:
-        """Ensure an existing ``path`` is a real file/dir that resolves to itself."""
+        """Ensure an existing ``path`` is a real file/dir that resolves to itself.
+
+        On POSIX, verified store nodes are hardened to owner-only modes (directories
+        ``0700``, files ``0600``). Symlinks are rejected before any mode change.
+        """
         if path.is_symlink():
             raise UnsafePathError(f"refusing to use symlinked path: {path}")
         resolved = path.resolve()
@@ -289,6 +403,7 @@ class EventStore:
             raise UnsafePathError(f"expected a directory: {path}")
         if not want_dir and not path.is_file():
             raise UnsafePathError(f"expected a regular file: {path}")
+        harden_store_node(path, want_dir=want_dir)
         return path
 
     def _existing_dir(self, path: Path) -> bool:
@@ -300,7 +415,7 @@ class EventStore:
     def _ensure_dir(self, path: Path) -> None:
         if not self._existing_dir(path):
             # Another process may create it between the check and mkdir.
-            path.mkdir(exist_ok=True)
+            path.mkdir(mode=STORE_DIR_MODE, exist_ok=True)
             self._check_real(path, want_dir=True)
 
     def existing_store_file(self, path: Path) -> bool:
@@ -377,7 +492,7 @@ class EventStore:
             session_id = new_session_id(started)
             directory = self.session_dir(session_id)
             try:
-                directory.mkdir()
+                directory.mkdir(mode=STORE_DIR_MODE)
             except FileExistsError:
                 continue
             self._check_real(directory, want_dir=True)
@@ -388,8 +503,8 @@ class EventStore:
                 agentbodycam_version=__version__,
                 platform=PlatformInfo.current(),
             )
-            with (directory / EVENTS_FILENAME).open("xb"):
-                pass
+            secure_create_file(directory / EVENTS_FILENAME)
+            self._check_real(directory / EVENTS_FILENAME, want_dir=False)
             # session.json is written last so its presence marks a complete session.
             self._write_session(directory, session)
             return session
@@ -646,7 +761,7 @@ class EventStore:
             raise EventValidationError(
                 f"event is {len(line)} bytes; the limit is {MAX_EVENT_BYTES} bytes"
             )
-        with path.open("ab") as fh:
+        with os.fdopen(open_store_file_append(path), "ab") as fh:
             fh.write(line)
             fh.flush()
             os.fsync(fh.fileno())

@@ -9,7 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Critical audit findings ABD-001 … ABD-004 (Task 14A; ABD-005 … ABD-008 not addressed):
+- Remaining release-blocking audit findings ABD-005 and ABD-006 (Task 14B; ABD-007 and
+  ABD-008 still open):
+  - **ABD-005**: wheels and sdists shipped only AgentBodycam's MIT `LICENSE` while the
+    Replay UI bundles React, ReactDOM and Scheduler. Added `THIRD_PARTY_NOTICES.md` with
+    the upstream Meta MIT copyright/license text, included via `license-files` in both
+    artifacts, with packaging regression tests (including wheel-from-sdist).
+  - **ABD-006**: under a normal POSIX umask, `.agentbodycam/` directories were `0755` and
+    `events.jsonl` was `0644`, so other local accounts could read evidence. Store creation
+    now requests owner-only modes (`0700` / `0600`), hardens verified nodes with
+    `fchmod`, and refuses to continue if an existing permissive store cannot be tightened.
+    Windows behaviour is unchanged (filesystem ACLs; no Unix-mode security theatre).
+- Critical audit findings ABD-001 … ABD-004 (Task 14A):
   - **ABD-001**: `doctor` used `shutil.which("git")`, which on Windows can execute a
     project-local `git.cmd` / `git.bat`. Git discovery is consolidated on
     `find_git_executable` (absolute PATH only, never cwd, never `.cmd`/`.bat` shims).
