@@ -416,6 +416,8 @@ def started_draft(command_id: str, command: RedactedCommand, working_directory: 
             "argv_redacted": command.redacted,
             "argv_truncated": command.truncated,
             "argv_paths_rewritten": command.paths_rewritten,
+            # Parallel to argv: how each item was produced (additive; older recordings omit it).
+            "argv_item_origins": [origin.value for origin in command.item_origins],
             "working_directory": working_directory,
             "shell": False,
             "stdio": "inherited",

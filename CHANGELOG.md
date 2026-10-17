@@ -9,6 +9,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Remaining audit blockers ABD-002 and ABD-003 (Task 14C; fixes present pending re-audit;
+  ABD-007 and ABD-008 still open; not claiming Codex verification yet):
+  - **ABD-002**: a user-typed literal `<project>/…` could collide with an absolute project
+    path redacted to the same text, inventing a false OBSERVED RECOVERY. `command.started`
+    now records per-item `argv_item_origins` (`literal` / `project_path` /
+    `external_path` / `embedded_path`); check identity includes those origins. Legacy
+    events without origins stay conservative when a reserved marker appears without
+    rewrite provenance. Privacy unchanged: original absolute paths are still never stored.
+  - **ABD-003**: npm accepted `--if-present=true`, `--if-present=1` and abbreviations such
+    as `--if-pres` as the optional-script flag, but only exact `--if-present` was rejected
+    — those variants could create automatic `check.passed` for a missing script. Automatic
+    classification now recognises npm's long-option name/`=`value forms (and accepted
+    prefixes) before `--`; tokens after `--` remain script arguments. pnpm's before-script
+    optional form stays unclassified; after-script `--if-present` for pnpm/yarn is not
+    treated as a manager no-op. Explicit `--check` remains authoritative.
 - Remaining release-blocking audit findings ABD-005 and ABD-006 (Task 14B; ABD-007 and
   ABD-008 still open):
   - **ABD-005**: wheels and sdists shipped only AgentBodycam's MIT `LICENSE` while the

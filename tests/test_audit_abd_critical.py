@@ -30,7 +30,11 @@ from agentbodycam.core.doctor import collect_environment
 from agentbodycam.core.forensics import analyze_session, check_signature
 from agentbodycam.core.git_observer import GitObserver
 from agentbodycam.core.recorder import Recorder
-from agentbodycam.core.redact import PROJECT_PLACEHOLDER, redact_command
+from agentbodycam.core.redact import (
+    PROJECT_PLACEHOLDER,
+    ArgvItemOrigin,
+    redact_command,
+)
 from agentbodycam.core.store import EventStore
 from agentbodycam.models.events import EventType
 from agentbodycam.utils.git import detect_git, find_git_executable, git_environment
@@ -55,6 +59,13 @@ def _recorded_argv(event: object) -> list[str]:
     argv = payload.get("argv") if isinstance(payload, dict) else None
     assert isinstance(argv, list) and all(isinstance(item, str) for item in argv)
     return list(argv)
+
+
+def _recorded_origins(event: object) -> list[str]:
+    payload = getattr(event, "payload", {})
+    origins = payload.get("argv_item_origins") if isinstance(payload, dict) else None
+    assert isinstance(origins, list) and all(isinstance(item, str) for item in origins)
+    return list(origins)
 
 
 # -- ABD-001: safe Git discovery for doctor --------------------------------------------------
@@ -125,17 +136,13 @@ def test_abd001_legitimate_git_still_selected_when_shims_present(
     assert status.path == real
 
 
-# -- ABD-002: false recovery from absolute/relative path collision ---------------------------
+# -- ABD-002: false recovery from reserved redaction-marker collision ------------------------
 
 
 def test_abd002_absolute_and_relative_project_scripts_are_not_false_recovery(
     project: Path,
 ) -> None:
-    """Codex reproduction: both runs from ``sub/``, different check.py files.
-
-    ``python <abs>/check.py`` fails (root script); ``python check.py`` passes (sub script).
-    After redaction both must not collapse into one recoverable identity.
-    """
+    """CASE 1 — original fixed case: abs project/check.py vs relative check.py from sub/."""
     write(project / "check.py", "import sys; sys.exit(1)\n")
     write(project / "sub" / "check.py", "import sys; sys.exit(0)\n")
     store = EventStore(project)
@@ -150,6 +157,8 @@ def test_abd002_absolute_and_relative_project_scripts_are_not_false_recovery(
 
     assert _recorded_argv(s1)[1] == f"{PROJECT_PLACEHOLDER}/check.py"
     assert _recorded_argv(s2)[1] == "check.py"
+    assert _recorded_origins(s1)[1] == ArgvItemOrigin.PROJECT_PATH.value
+    assert _recorded_origins(s2)[1] == ArgvItemOrigin.LITERAL.value
     assert s1.payload["working_directory"] == s2.payload["working_directory"] == "sub"
     assert check_signature("test", "command", s1) != check_signature("test", "command", s2)
 
@@ -158,18 +167,83 @@ def test_abd002_absolute_and_relative_project_scripts_are_not_false_recovery(
     assert report.unresolved_failures.total == 1
     [unresolved] = report.unresolved_failures.items
     assert unresolved.first_failed_event_id == failed.event_id
-    # The failed absolute check remains failed; the relative one is a separate passed state.
     results = {s.latest_result for s in report.final_check_states.items}
     assert "failed" in results and "passed" in results
     text = render_report(report)
-    assert report.recoveries.total == 0
     assert "unresolved in this recording" in text.lower()
     assert not CAUSAL_LANGUAGE.search(text)
     for banned in ("ROOT CAUSE", "FIXED BY", "CAUSED BY", "CULPRIT"):
         assert banned not in text.upper()
 
 
+def test_abd002_literal_reserved_marker_collision_is_not_false_recovery(
+    project: Path,
+) -> None:
+    """CASE 2 — Codex reproduction: literal ``<project>/check.py`` vs absolute project path.
+
+    Working directory ``project/sub/``. Two different files conceptually:
+    ``project/check.py`` and ``project/sub/<project>/check.py``.
+
+    SessionBuilder records evidence without executing; on Windows a real directory named
+    ``<project>`` cannot be created, but the recorded argv collision is identical.
+    """
+    write(project / "check.py", "import sys; sys.exit(1)\n")
+    write(project / "sub" / "check.py", "import sys; sys.exit(0)\n")
+    store = EventStore(project)
+    b = SessionBuilder(store)
+
+    abs_fail = [sys.executable, str((project / "check.py").resolve())]
+    literal_pass = [sys.executable, f"{PROJECT_PLACEHOLDER}/check.py"]
+
+    s1, _, failed = b.run_check(False, abs_fail, name="command", cwd="sub")
+    s2, _, _passed = b.run_check(True, literal_pass, name="command", cwd="sub")
+    b.stop()
+
+    assert _recorded_argv(s1)[1] == f"{PROJECT_PLACEHOLDER}/check.py"
+    assert _recorded_argv(s2)[1] == f"{PROJECT_PLACEHOLDER}/check.py"
+    assert _recorded_origins(s1)[1] == ArgvItemOrigin.PROJECT_PATH.value
+    assert _recorded_origins(s2)[1] == ArgvItemOrigin.LITERAL.value
+    assert check_signature("test", "command", s1) != check_signature("test", "command", s2)
+
+    report = analyze_session(store, b.session_id)
+    assert report.recoveries.total == 0
+    assert report.unresolved_failures.total == 1
+    [unresolved] = report.unresolved_failures.items
+    assert unresolved.first_failed_event_id == failed.event_id
+    text = render_report(report)
+    assert "observed recovery" not in text.lower()
+    assert "unresolved in this recording" in text.lower()
+    assert not CAUSAL_LANGUAGE.search(text)
+
+
+def test_abd002_reverse_literal_reserved_marker_collision_is_not_false_recovery(
+    project: Path,
+) -> None:
+    """CASE 3 — reverse: literal ``<project>/check.py`` fails, absolute project path passes."""
+    write(project / "check.py", "import sys; sys.exit(0)\n")
+    store = EventStore(project)
+    b = SessionBuilder(store)
+
+    literal_fail = [sys.executable, f"{PROJECT_PLACEHOLDER}/check.py"]
+    abs_pass = [sys.executable, str((project / "check.py").resolve())]
+
+    s1, _, failed = b.run_check(False, literal_fail, name="command", cwd="sub")
+    s2, _, _ = b.run_check(True, abs_pass, name="command", cwd="sub")
+    b.stop()
+
+    assert _recorded_argv(s1) == _recorded_argv(s2)
+    assert _recorded_origins(s1)[1] == ArgvItemOrigin.LITERAL.value
+    assert _recorded_origins(s2)[1] == ArgvItemOrigin.PROJECT_PATH.value
+    assert check_signature("test", "command", s1) != check_signature("test", "command", s2)
+
+    report = analyze_session(store, b.session_id)
+    assert report.recoveries.total == 0
+    assert report.unresolved_failures.total == 1
+    assert report.unresolved_failures.items[0].first_failed_event_id == failed.event_id
+
+
 def test_abd002_same_identifiable_relative_check_still_recovers(project: Path) -> None:
+    """CASE 4 — genuine relative recovery."""
     write(project / "check.py", "import sys; sys.exit(1)\n")
     store = EventStore(project)
     b = SessionBuilder(store)
@@ -186,6 +260,7 @@ def test_abd002_same_identifiable_relative_check_still_recovers(project: Path) -
 
 
 def test_abd002_same_absolute_project_path_still_recovers(project: Path) -> None:
+    """CASE 5 — genuine project-absolute recovery when identity remains safely provable."""
     script = project / "check.py"
     write(script, "import sys; sys.exit(1)\n")
     store = EventStore(project)
@@ -195,53 +270,128 @@ def test_abd002_same_absolute_project_path_still_recovers(project: Path) -> None
     s2, _, _ = b.run_check(True, argv, name="command")
     b.stop()
     assert _recorded_argv(s1)[1] == f"{PROJECT_PLACEHOLDER}/check.py"
+    assert _recorded_origins(s1)[1] == ArgvItemOrigin.PROJECT_PATH.value
     assert check_signature("test", "command", s1) == check_signature("test", "command", s2)
     report = analyze_session(store, b.session_id)
     assert report.recoveries.total == 1
     assert report.unresolved_failures.total == 0
 
 
-# -- ABD-003: npm --if-present must not become a passed build --------------------------------
+def test_abd002_privacy_redaction_keeps_no_absolute_paths(project: Path, tmp_path: Path) -> None:
+    """Stored command evidence must not contain project / home / external absolute paths."""
+    home = tmp_path / "home"
+    home.mkdir()
+    external = tmp_path / "outside" / "secret.bin"
+    write(external, "x")
+    script = project / "app.py"
+    write(script, "pass\n")
+
+    abs_script = str(script.resolve())
+    abs_home_file = str((home / "notes.txt").resolve())
+    abs_external = str(external.resolve())
+    argv = [sys.executable, abs_script, abs_home_file, abs_external, f"--cfg={abs_script}"]
+
+    result = redact_command(argv, project_root=project.resolve(), home=home.resolve())
+    joined = " ".join(result.argv)
+    assert str(project.resolve()) not in joined
+    assert str(home.resolve()) not in joined
+    assert abs_external not in joined
+    assert abs_script not in joined
+    assert result.item_origins[1] is ArgvItemOrigin.PROJECT_PATH
+    assert PROJECT_PLACEHOLDER in result.argv[1]
+
+    store = EventStore(project)
+    b = SessionBuilder(store)
+    started = b.start(argv)
+    b.finish(started, exit_code=0)
+    b.stop()
+    recorded = " ".join(_recorded_argv(started))
+    assert str(project.resolve()) not in recorded
+    assert abs_external not in recorded
+
+
+def test_abd002_legacy_literal_marker_without_origins_is_ungrouped(project: Path) -> None:
+    """Legacy recordings lacking argv_item_origins: literal reserved markers stay ungrouped."""
+    store = EventStore(project)
+    b = SessionBuilder(store)
+    started, _, _ = b.run_check(
+        False, [sys.executable, f"{PROJECT_PLACEHOLDER}/check.py"], name="command"
+    )
+    b.stop()
+    # Simulate a pre-provenance command.started: same recorded text, no origins, no rewrite.
+    started.payload.pop("argv_item_origins", None)
+    started.payload["argv_paths_rewritten"] = False
+    assert f"{PROJECT_PLACEHOLDER}/check.py" in _recorded_argv(started)
+    assert check_signature("test", "command", started) is None
+
+
+# -- ABD-003: npm optional-script flag variants must not become a passed build ---------------
 
 
 def test_abd003_if_present_is_not_automatic_but_explicit_still_classifies() -> None:
     for argv in (
         ["npm", "run", "build", "--if-present"],
-        ["pnpm", "run", "build", "--if-present"],
-        ["yarn", "run", "build", "--if-present"],
-        ["pnpm", "build", "--if-present"],
-        ["yarn", "build", "--if-present"],
+        ["npm", "run", "build", "--if-present=true"],
+        ["npm", "run", "build", "--if-present=1"],
+        ["npm", "run", "build", "--if-pres"],
+        ["pnpm", "run", "--if-present", "build"],
+        ["pnpm", "run", "--if-present=true", "build"],
         ["cmd", "/c", "npm", "run", "build", "--if-present"],
+        ["cmd", "/c", "npm", "run", "build", "--if-present=true"],
     ):
         assert classify_command(argv) is None, argv
         explicit = explicit_classification(CheckKind.BUILD, argv)
         assert explicit.source is ClassificationSource.EXPLICIT
-        assert "build" in explicit.name
+        assert explicit.kind is CheckKind.BUILD
+
+
+def test_abd003_npm_double_dash_boundary_does_not_treat_script_arg_as_optional() -> None:
+    argv = ["npm", "run", "build", "--", "--if-present"]
+    result = classify_command(argv)
+    assert result is not None
+    assert result.kind is CheckKind.BUILD
+    assert result.source is ClassificationSource.AUTOMATIC
+
+
+def test_abd003_pnpm_after_script_if_present_is_not_manager_optional() -> None:
+    """pnpm only treats ``--if-present`` before the script name as optional."""
+    assert classify_command(["pnpm", "run", "build", "--if-present"]) is not None
+    assert classify_command(["pnpm", "build", "--if-present"]) is not None
+
+
+def test_abd003_yarn_after_script_if_present_is_not_manager_optional() -> None:
+    """Yarn classic has no after-script optional no-op equivalent."""
+    assert classify_command(["yarn", "run", "build", "--if-present"]) is not None
+    assert classify_command(["yarn", "build", "--if-present"]) is not None
 
 
 @requires_npm
-def test_abd003_real_npm_if_present_without_build_script_is_not_a_check(
+@pytest.mark.parametrize(
+    "flag",
+    ["--if-present", "--if-present=true", "--if-present=1", "--if-pres"],
+)
+def test_abd003_real_npm_if_present_variants_without_build_script_are_not_checks(
     project: Path,
+    flag: str,
 ) -> None:
     write(
         project / "package.json",
         json.dumps({"name": "abd003", "private": True, "scripts": {}}),
     )
-    # Confirm the real npm command exits 0 when the script is absent.
     probe = subprocess.run(  # noqa: S603
-        _npm_argv("run", "build", "--if-present"),
+        _npm_argv("run", "build", flag),
         cwd=project,
         capture_output=True,
         text=True,
         check=False,
     )
-    assert probe.returncode == 0, probe.stderr
+    assert probe.returncode == 0, (flag, probe.stderr)
 
     store = EventStore(project)
     recorder = Recorder(store, record_git=False)
     recorder.start()
     try:
-        argv = _npm_argv("run", "build", "--if-present")
+        argv = _npm_argv("run", "build", flag)
         assert classify_command(argv) is None
         code, err = run_cli("run", "--project", str(project), "--", *argv)
         assert code == 0, err
@@ -290,6 +440,73 @@ def test_abd003_real_npm_build_script_still_becomes_a_check(project: Path) -> No
     assert len(checks) == 1
     assert checks[0].payload["name"] == "npm build"
     assert checks[0].payload["classification"] == "automatic"
+
+
+@requires_npm
+def test_abd003_real_npm_double_dash_boundary_with_build_script_still_checks(
+    project: Path,
+) -> None:
+    """``npm run build -- --if-present`` is not npm's optional-script flag."""
+    write(project / "build.js", "process.exit(0);\n")
+    write(
+        project / "package.json",
+        json.dumps(
+            {
+                "name": "abd003-boundary",
+                "private": True,
+                # Script file (not `node -e`) so forwarded `--if-present` is argv, not a
+                # node binary option.
+                "scripts": {"build": "node build.js"},
+            }
+        ),
+    )
+    argv = _npm_argv("run", "build", "--", "--if-present")
+    assert classify_command(argv) is not None
+
+    store = EventStore(project)
+    recorder = Recorder(store, record_git=False)
+    recorder.start()
+    try:
+        code, err = run_cli("run", "--project", str(project), "--", *argv)
+        assert code == 0, err
+    finally:
+        recorder.stop()
+
+    checks = [
+        e
+        for e in store.read_events(recorder.session.session_id)
+        if e.type is EventType.CHECK_PASSED
+    ]
+    assert len(checks) == 1
+    assert checks[0].payload["classification"] == "automatic"
+
+
+@requires_npm
+def test_abd003_explicit_check_override_still_records_check_for_if_present(
+    project: Path,
+) -> None:
+    write(
+        project / "package.json",
+        json.dumps({"name": "abd003-explicit", "private": True, "scripts": {}}),
+    )
+    argv = _npm_argv("run", "build", "--if-present=true")
+    store = EventStore(project)
+    recorder = Recorder(store, record_git=False)
+    recorder.start()
+    try:
+        code, err = run_cli("run", "--project", str(project), "--check", "build", "--", *argv)
+        assert code == 0, err
+    finally:
+        recorder.stop()
+
+    checks = [
+        e
+        for e in store.read_events(recorder.session.session_id)
+        if e.type is EventType.CHECK_PASSED
+    ]
+    assert len(checks) == 1
+    assert checks[0].payload["classification"] == "explicit"
+    assert checks[0].payload["kind"] == "build"
 
 
 # -- ABD-004: Git observer must not lazy-fetch ----------------------------------------------

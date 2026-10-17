@@ -83,7 +83,10 @@ Wrapped commands (`agentbodycam run -- <command> [args...]`):
   keys/tokens and long random-looking strings become `<redacted>`; absolute paths inside
   the project become `<project>` / `<project>/rel` (so an originally absolute path cannot
   be mistaken for one typed relative), anything else becomes `<external-path>`, and the
-  project and home directories are never stored verbatim. Drive and UNC paths (`C:\...`,
+  project and home directories are never stored verbatim. Each argv item also records a
+  privacy-safe origin (`literal` / `project_path` / `external_path` / `embedded_path`) so
+  a generated placeholder is never indistinguishable from the same characters typed by the
+  user; origins never store the original absolute path. Drive and UNC paths (`C:\...`,
   `\\server\...`) count as absolute on every platform, and on Windows so do driveless
   rooted paths with two or more segments (`/home/<name>/...`, `\Users\<name>\...`);
   single-segment switches such as `/c` are kept. The argument list is capped (64 items,

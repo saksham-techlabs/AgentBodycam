@@ -17,9 +17,10 @@ Rules (see docs/architecture.md, "Local forensics engine"):
   A plain non-zero exit of an unclassified command is not a failure (``git diff --quiet``).
 - Two check runs are the *same check* only when their signature matches: a SHA-256 over
   the canonical JSON of the check kind and name and the paired ``command.started``'s
-  recorded executable, recorded (redacted) argv and project-relative working directory.
-  Absolute project paths are recorded as ``<project>/...``, so they cannot collapse with
-  an originally relative argument that happens to look the same after redaction. When the
+  recorded executable, recorded (redacted) argv, per-item argv origins and
+  project-relative working directory. Absolute project paths are recorded as
+  ``<project>/...`` with origin ``project_path``, so they cannot collapse with an
+  originally relative argument or with a user-typed literal ``<project>/...``. When the
   recorded argv is lossy (truncated, redacted, or an argument rewritten to
   ``<external-path>``) the run is left ungrouped: missing a recovery is preferred over
   inventing one.
@@ -44,7 +45,12 @@ from pathlib import Path
 
 from agentbodycam.core.active import ActiveSessionInfo, ActiveState, get_active_session
 from agentbodycam.core.checks import CheckKind, judge
-from agentbodycam.core.redact import EXTERNAL_PATH, REDACTED
+from agentbodycam.core.redact import (
+    EXTERNAL_PATH,
+    REDACTED,
+    ArgvItemOrigin,
+    contains_reserved_marker,
+)
 from agentbodycam.core.store import EventStore, StoreError
 from agentbodycam.models.events import (
     Event,
@@ -158,11 +164,14 @@ def check_signature(kind: str, name: str, started: Event) -> str | None:
     """Deterministic identity of a check run, or ``None`` if it cannot be trusted.
 
     Built only from evidence already stored: the check's kind and generated name and the
-    paired ``command.started``'s recorded executable, recorded (redacted) argv and recorded
-    project-relative working directory. The original process argv is never involved.
-    ``None`` when the recorded argv does not faithfully identify the invocation: truncated,
-    redacted, or an argument (after the program itself) rewritten to ``<external-path>``,
-    because two different invocations could then look identical.
+    paired ``command.started``'s recorded executable, recorded (redacted) argv, per-item
+    argv origins (when present) and recorded project-relative working directory. The
+    original process argv is never involved. ``None`` when the recorded argv does not
+    faithfully identify the invocation: truncated, redacted, an argument (after the
+    program itself) rewritten to ``<external-path>``, or (legacy recordings without
+    origins) a reserved placeholder that could equally be user-typed literal text —
+    because two different invocations could then look identical. A missed recovery is
+    preferred over an invented one.
     """
     payload = started.payload
     argv = payload.get("argv")
@@ -186,6 +195,16 @@ def check_signature(kind: str, name: str, started: Event) -> str | None:
         return None
     if REDACTED in items[0]:
         return None
+    origins = _argv_item_origins(payload, len(items))
+    # Legacy command.started without origins: refuse to group when a reserved
+    # marker appears without path-rewrite provenance — a literal typed
+    # ``<project>/…`` must not recover against a rewritten absolute path.
+    if (
+        origins is None
+        and _bool(payload, "argv_paths_rewritten") is not True
+        and any(contains_reserved_marker(item) for item in items)
+    ):
+        return None
     basis: JsonObject = {
         "version": SIGNATURE_VERSION,
         "kind": kind,
@@ -194,7 +213,26 @@ def check_signature(kind: str, name: str, started: Event) -> str | None:
         "argv": list(items),
         "working_directory": working_directory,
     }
+    if origins is not None:
+        basis["argv_item_origins"] = list(origins)
     return hashlib.sha256(dumps_canonical(basis).encode("utf-8")).hexdigest()
+
+
+_ORIGIN_VALUES = frozenset(origin.value for origin in ArgvItemOrigin)
+
+
+def _argv_item_origins(payload: JsonObject, expected_len: int) -> list[str] | None:
+    """Return validated per-item origins, or ``None`` when absent / unusable."""
+    raw = payload.get("argv_item_origins")
+    if raw is None:
+        return None
+    if (
+        not isinstance(raw, list)
+        or len(raw) != expected_len
+        or not all(isinstance(item, str) and item in _ORIGIN_VALUES for item in raw)
+    ):
+        return None
+    return [str(item) for item in raw]
 
 
 # -- file-change windows -------------------------------------------------------------------

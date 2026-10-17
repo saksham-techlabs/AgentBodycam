@@ -325,6 +325,44 @@ def test_signature_uses_only_recorded_fields(b: SessionBuilder) -> None:
     assert check_signature("test", "pytest", other) == expected  # pid/ids are not identity
 
 
+def test_signature_includes_argv_item_origins_so_literal_markers_cannot_collide(
+    b: SessionBuilder,
+) -> None:
+    """Generated ``<project>/…`` and a user-typed literal of the same text stay distinct."""
+    from agentbodycam.core.redact import PROJECT_PLACEHOLDER, ArgvItemOrigin
+
+    abs_started, _, _ = b.run_check(
+        False, ["python", str((b.store.project_root / "check.py").resolve())], name="command"
+    )
+    lit_started, _, _ = b.run_check(
+        True, ["python", f"{PROJECT_PLACEHOLDER}/check.py"], name="command"
+    )
+    b.stop()
+    assert abs_started.payload["argv"] == lit_started.payload["argv"]
+    abs_origins = abs_started.payload["argv_item_origins"]
+    lit_origins = lit_started.payload["argv_item_origins"]
+    assert isinstance(abs_origins, list) and isinstance(lit_origins, list)
+    assert abs_origins[1] == ArgvItemOrigin.PROJECT_PATH.value
+    assert lit_origins[1] == ArgvItemOrigin.LITERAL.value
+    assert check_signature("test", "command", abs_started) != check_signature(
+        "test", "command", lit_started
+    )
+    # Changing only origins (holding argv fixed) must change identity.
+    flipped = dataclasses.replace(
+        abs_started,
+        payload=abs_started.payload
+        | {
+            "argv_item_origins": [
+                ArgvItemOrigin.LITERAL.value,
+                ArgvItemOrigin.LITERAL.value,
+            ]
+        },
+    )
+    assert check_signature("test", "command", flipped) != check_signature(
+        "test", "command", abs_started
+    )
+
+
 # -- 14-18: commands -------------------------------------------------------------------------
 
 

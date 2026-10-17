@@ -288,6 +288,7 @@ before the spawn). argparse usage errors exit 2.
 {"command_id": "bd1454a760fd5a4d1c6ca6b53b7b717f", "executable": "python",
  "argv": ["python", "-m", "pytest", "--token", "<redacted>"], "argument_count": 4,
  "argv_redacted": true, "argv_truncated": false, "argv_paths_rewritten": false,
+ "argv_item_origins": ["literal", "literal", "literal", "literal"],
  "working_directory": ".", "shell": false, "stdio": "inherited",
  "output_recorded": false, "environment_recorded": false,
  "wrapper": {"kind": "agentbodycam-run", "pid": 25788}}
@@ -342,9 +343,17 @@ child always receives the original argv):
   (`\\server\...`) are absolute on every platform; on Windows a driveless rooted path with
   at least two segments (`/home/me/x`, `\Users\me\x`) is too, while single-segment
   switches such as `/c` or `/p:Name=value` are kept.
+- Per-item origins (`argv_item_origins`, parallel to `argv`): each item is recorded as
+  `literal`, `project_path`, `external_path`, or `embedded_path`. A generated placeholder
+  is therefore never indistinguishable from the same characters typed by the user (for
+  example a literal directory named `<project>`). Origins never store the original
+  absolute path. Check identity includes these origins when present; older recordings
+  without them stay conservative when a reserved marker appears without rewrite
+  provenance.
 - Bounds: at most 64 items, 256 characters per item, 4096 characters in total; redaction
-  happens before truncation. `argv_redacted`, `argv_truncated` and `argv_paths_rewritten`
-  record what happened; `argument_count` is the real number of arguments.
+  happens before truncation. `argv_redacted`, `argv_truncated`, `argv_paths_rewritten`
+  and `argv_item_origins` record what happened; `argument_count` is the real number of
+  arguments.
 
 Redaction is a safety net, not a guarantee: a secret in an unrecognised position or format
 can still be recorded.
@@ -410,15 +419,21 @@ executing the check:
 | `go build` (`-x` or `--x`) | `-h`, `-help`, `-n` |
 | `dotnet test` | `-h`, `--help`, `-?`, `/?`, `--list-tests`, `-t` |
 | `dotnet build` | `-h`, `--help`, `-?`, `/?` |
-| npm / pnpm / yarn scripts | `-h`, `--help`, `-?`, `-v`, `-V`, `--version`, `--if-present` after the script name (the underlying tool is unknown; `--if-present` allows a missing script to exit 0 without running) |
+| npm / pnpm / yarn scripts | `-h`, `--help`, `-?`, `-v`, `-V`, `--version` (the underlying tool is unknown) |
+| npm scripts (manager options before `--`) | optional-script forms that npm accepts for a missing-script no-op: `--if-present`, `--if-present=<value>`, and unique prefixes such as `--if-pres` / `--if`. Tokens after `--` are script arguments and are not treated as this manager flag. |
+| pnpm | `--if-present` / `--if-present=<value>` *before* the script name (`pnpm run --if-present build`) never parse as a known script here, so they stay unclassified. After the script name, pnpm forwards the token to the script — not a manager no-op. |
+| yarn | Yarn classic has no after-script optional no-op equivalent; after-script `--if-present` does not block automatic classification. |
 
 The reason is a forensic invariant: `pytest --version` or `mypy --version` exiting 0 says
 nothing about the project's tests or types, so it must never become a `check.passed` that
 a future forensic engine could read as "the test suite passed" or "type checking passed".
-Likewise `npm run build --if-present` (and the equivalent `pnpm` / `yarn` forms) must not
-become an automatic passed build when no build script exists. Explicit `--check KIND`
-still classifies such an invocation if the user insisted; automatic classification does
-not. Matching is exact per argument; a flag's *value* (`pytest -k version`) is not a flag.
+Likewise npm's optional-script flag family (`npm run build --if-present`,
+`--if-present=true`, `--if-present=1`, `--if-pres`, …) must not become an automatic passed
+build when no build script exists. Explicit `--check KIND` still classifies such an
+invocation if the user insisted; automatic classification does not. For help/version
+flags, matching is exact per argument; a flag's *value* (`pytest -k version`) is not a
+flag. For npm's optional-script option, name/value forms and accepted abbreviations are
+recognised without implementing a full npm parser.
 
 **Explicit shell wrappers** are looked through, for classification only (argv passed to
 the child is never changed, and no shell is ever added): `cmd [/d] [/q] [/s] /c <command>`
@@ -843,7 +858,8 @@ check_signature = sha256(canonical_json({
     "version": 1, "kind": <check kind>, "name": <generated check name>,
     "executable": <recorded program file name>,
     "argv": <command.started's recorded, redacted argv>,
-    "working_directory": <recorded project-relative working directory>}))
+    "working_directory": <recorded project-relative working directory>,
+    "argv_item_origins": <per-item origins when present>}))
 ```
 
 Only evidence already stored is used; the original process argv is never involved. A run
@@ -854,12 +870,14 @@ argv is lossy: `argv_truncated`, `argv_redacted`, `argument_count` not matching,
 argument after the program rewritten to `<external-path>` (two different paths would look
 identical). The program itself (`argv[0]`) is accepted when it was rewritten to
 `<external-path>` because absolute interpreter paths always are; the recorded executable
-file name stands in for it. Absolute project paths are recorded as `<project>/...`, so
-`python <abs>/check.py` and `python check.py` from the same working directory remain
-different checks even though both refer to a file named `check.py`. So `pytest tests/auth`
-and `pytest tests/billing`, or the same argv in two working directories, are different
-checks; missing a recovery is preferred over inventing one. When several signatures share
-a name, `display_name` adds the first 8 hex characters (`pytest [2221cf76]`).
+file name stands in for it. Absolute project paths are recorded as `<project>/...` with
+origin `project_path`, so they cannot collapse with a relative `check.py` or with a
+user-typed literal `<project>/check.py` (origin `literal`). Older recordings without
+`argv_item_origins` stay conservative when a reserved marker appears without rewrite
+provenance. So `pytest tests/auth` and `pytest tests/billing`, or the same argv in two
+working directories, are different checks; missing a recovery is preferred over inventing
+one. When several signatures share a name, `display_name` adds the first 8 hex characters
+(`pytest [2221cf76]`).
 
 **Relationship validation.** Per `command_id`: `command.started` -> `command.finished` ->
 optional check event. Indexes are built in the single pass. Contradictions produce a

@@ -15,6 +15,11 @@ untouched arguments. The rules prefer hiding too much over leaking a secret:
   Drive and UNC paths count as absolute on every platform, and so do driveless rooted
   paths with two or more segments on Windows (``/home/me/x``, ``\\Users\\me\\x``).
 
+Each recorded argv item also carries a privacy-safe *origin* (``literal``,
+``project_path``, ``external_path``, or ``embedded_path``) so a generated placeholder
+cannot be mistaken for the same characters typed by the user. Origins never store the
+original absolute path.
+
 The result is also bounded in item count, item length and total size.
 """
 
@@ -25,6 +30,7 @@ import re
 import sys
 from collections.abc import Sequence
 from dataclasses import dataclass
+from enum import StrEnum
 from pathlib import Path, PurePosixPath, PureWindowsPath
 
 REDACTED = "<redacted>"
@@ -32,11 +38,30 @@ EXTERNAL_PATH = "<external-path>"
 PROJECT_PLACEHOLDER = "<project>"
 HOME_PLACEHOLDER = "<home>"
 TRUNCATION_MARK = "...<truncated>"
+# Text AgentBodycam may insert into recorded argv. A user can type the same characters;
+# origins (and forensics) must keep those cases distinguishable.
+RESERVED_MARKERS = (
+    PROJECT_PLACEHOLDER,
+    HOME_PLACEHOLDER,
+    EXTERNAL_PATH,
+    REDACTED,
+    "<truncated>",
+)
 
 MAX_ARGV_ITEMS = 64
 MAX_ARG_CHARS = 256
 MAX_ARGV_CHARS = 4096
 MAX_DISPLAY_CHARS = 300
+
+
+class ArgvItemOrigin(StrEnum):
+    """How one recorded argv item was produced (never the original absolute path)."""
+
+    LITERAL = "literal"  # user text (secrets may still be scrubbed inside it)
+    PROJECT_PATH = "project_path"  # absolute path inside the project → <project>[/…]
+    EXTERNAL_PATH = "external_path"  # absolute path outside the project → <external-path>
+    EMBEDDED_PATH = "embedded_path"  # project/home root substituted inside a larger item
+
 
 # Matched as substrings of a normalised name (lowercase, "_" and "." turned into "-").
 _SENSITIVE_PARTS = (
@@ -110,6 +135,8 @@ class RedactedCommand:
     redacted: bool
     truncated: bool
     paths_rewritten: bool
+    # Parallel to ``argv``: how each recorded item was produced (privacy-safe).
+    item_origins: tuple[ArgvItemOrigin, ...]
 
     def display(self, limit: int = MAX_DISPLAY_CHARS) -> str:
         """A short single-line rendering for summaries (display only, not shell syntax)."""
@@ -127,6 +154,17 @@ def _display_item(item: str) -> str:
     if not item or any(ch.isspace() for ch in item):
         return f'"{item}"'
     return item
+
+
+def contains_reserved_marker(text: str) -> bool:
+    """True when ``text`` includes any AgentBodycam-generated placeholder spelling."""
+    return any(marker in text for marker in RESERVED_MARKERS)
+
+
+@dataclass(frozen=True, slots=True)
+class _PathRewrite:
+    text: str
+    origin: ArgvItemOrigin
 
 
 class _Redactor:
@@ -150,14 +188,15 @@ class _Redactor:
         self.redacted = True
         return REDACTED
 
-    def item(self, text: str) -> str:
+    def item(self, text: str) -> tuple[str, ArgvItemOrigin]:
         if _PRIVATE_KEY.search(text):
-            return self.redact()
+            return self.redact(), ArgvItemOrigin.LITERAL
         match = _ASSIGNMENT.match(text)
         if match and is_sensitive_name(match["name"]) and not _looks_absolute(text):
-            return f"{match['name']}{match['sep']}{self.redact()}"
+            return f"{match['name']}{match['sep']}{self.redact()}", ArgvItemOrigin.LITERAL
         text = self.scrub(text)
-        return self._paths(text)
+        rewritten = self._paths(text)
+        return rewritten.text, rewritten.origin
 
     def scrub(self, text: str) -> str:
         def userinfo(m: re.Match[str]) -> str:
@@ -191,28 +230,33 @@ class _Redactor:
             text = pattern.sub(token, text)
         return _RANDOM_LOOKING.sub(random_looking, text)
 
-    def _paths(self, text: str) -> str:
+    def _paths(self, text: str) -> _PathRewrite:
         if _looks_absolute(text):
             return self._path(text)
         match = None if _URL.match(text) else _ASSIGNMENT.match(text)
         if match and _looks_absolute(match["value"]):
-            return f"{match['name']}{match['sep']}{self._path(match['value'])}"
+            rewritten = self._path(match["value"])
+            return _PathRewrite(f"{match['name']}{match['sep']}{rewritten.text}", rewritten.origin)
+        embedded = False
         for pattern, placeholder in self._embedded:
             text, count = pattern.subn(placeholder, text)
             if count:
+                embedded = True
                 self.paths_rewritten = True
-        return text
+        if embedded:
+            return _PathRewrite(text, ArgvItemOrigin.EMBEDDED_PATH)
+        return _PathRewrite(text, ArgvItemOrigin.LITERAL)
 
-    def _path(self, text: str) -> str:
+    def _path(self, text: str) -> _PathRewrite:
         self.paths_rewritten = True
         relative = project_relative(text, self.project_root, self.home)
         if relative is None:
-            return EXTERNAL_PATH
+            return _PathRewrite(EXTERNAL_PATH, ArgvItemOrigin.EXTERNAL_PATH)
         # Keep a privacy-safe provenance marker: an argument that was absolute (and
         # rewritten) must not look identical to one that was typed as a relative path.
         if relative == ".":
-            return PROJECT_PLACEHOLDER
-        return f"{PROJECT_PLACEHOLDER}/{relative}"
+            return _PathRewrite(PROJECT_PLACEHOLDER, ArgvItemOrigin.PROJECT_PATH)
+        return _PathRewrite(f"{PROJECT_PLACEHOLDER}/{relative}", ArgvItemOrigin.PROJECT_PATH)
 
 
 _WINDOWS = sys.platform == "win32"
@@ -265,25 +309,27 @@ def redact_command(
         raise ValueError("argv must not be empty")
     redactor = _Redactor(Path(project_root), home)
     items: list[str] = []
+    origins: list[ArgvItemOrigin] = []
     truncated = False
     total = 0
     redact_next = False
     for raw in argv:
         if redact_next and not raw.startswith("--"):
-            item = redactor.redact()
+            item, origin = redactor.redact(), ArgvItemOrigin.LITERAL
             redact_next = False
         else:
             flag = _FLAG.match(raw)
             redact_next = bool(flag and is_sensitive_name(flag["name"])) or (
                 raw.lower() == "bearer"
             )
-            item = redactor.item(raw)
+            item, origin = redactor.item(raw)
         item, cut = _cap(item)
         truncated = truncated or cut
         if len(items) >= MAX_ARGV_ITEMS or total + len(item) > MAX_ARGV_CHARS:
             truncated = True
             break
         items.append(item)
+        origins.append(origin)
         total += len(item)
     executable = _executable_name(argv[0], redactor)
     return RedactedCommand(
@@ -293,6 +339,7 @@ def redact_command(
         redacted=redactor.redacted,
         truncated=truncated,
         paths_rewritten=redactor.paths_rewritten,
+        item_origins=tuple(origins),
     )
 
 

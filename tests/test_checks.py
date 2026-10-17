@@ -185,17 +185,21 @@ INFORMATIONAL = [
     "npm run build -- --help",
     "npm run lint -- --version",
     "npm run build --if-present",
+    "npm run build --if-present=true",
+    "npm run build --if-present=1",
+    "npm run build --if-pres",
+    "npm run build --if",
     "npm run-script test --if-present",
     "pnpm test -- --help",
     "pnpm lint -- --help",
     "pnpm run typecheck -- -h",
-    "pnpm run build --if-present",
-    "pnpm build --if-present",
+    # pnpm optional form is *before* the script name; that never parses as a known script.
+    "pnpm run --if-present build",
+    "pnpm run --if-present=true build",
+    "pnpm --if-present run build",
     "yarn lint -- --help",
     "yarn typecheck -- --help",
     "yarn build -- -v",
-    "yarn run build --if-present",
-    "yarn build --if-present",
 ]
 
 
@@ -237,7 +241,14 @@ def test_informational_invocations_behind_wrappers(argv: list[str]) -> None:
         ("npm test", TEST, "npm test"),
         ("npm test -- --watch=false", TEST, "npm test"),
         ("npm run build", BUILD, "npm build"),
+        # After ``--``, ``--if-present`` is a script argument, not npm's optional flag.
+        ("npm run build -- --if-present", BUILD, "npm build"),
         ("pnpm lint", LINT, "pnpm lint"),
+        # pnpm/yarn: ``--if-present`` after the script name is not a manager no-op.
+        ("pnpm run build --if-present", BUILD, "pnpm build"),
+        ("pnpm build --if-present", BUILD, "pnpm build"),
+        ("yarn run build --if-present", BUILD, "yarn build"),
+        ("yarn build --if-present", BUILD, "yarn build"),
         ("yarn typecheck", TYPECHECK, "yarn typecheck"),
     ],
 )
@@ -266,6 +277,40 @@ def test_explicit_check_still_classifies_if_present_package_scripts() -> None:
     assert classify_command(argv) is None
     result = explicit_classification(BUILD, argv)
     assert result == CheckClassification(BUILD, "npm build", ClassificationSource.EXPLICIT)
+
+
+@pytest.mark.parametrize(
+    "flag",
+    [
+        "--if-present",
+        "--if-present=true",
+        "--if-present=1",
+        "--if-present=yes",
+        "--if-pres",
+        "--if-prese",
+        "--if",
+    ],
+)
+def test_npm_if_present_value_and_abbreviation_forms_are_not_automatic(flag: str) -> None:
+    assert classify_command(["npm", "run", "build", flag]) is None
+    assert classify_command(["cmd", "/c", "npm", "run", "build", flag]) is None
+
+
+def test_npm_if_present_after_double_dash_is_script_argument_not_optional() -> None:
+    """``npm run build -- --if-present`` passes the flag to the script, not to npm."""
+    assert auto("npm run build -- --if-present") == (BUILD, "npm build")
+    assert classify_command(["npm", "run", "build", "--if-present"]) is None
+
+
+def test_pnpm_optional_form_before_script_is_not_automatic() -> None:
+    assert classify_command(["pnpm", "run", "--if-present", "build"]) is None
+    assert classify_command(["pnpm", "run", "--if-present=true", "build"]) is None
+    assert classify_command(["pnpm", "--if-present", "run", "build"]) is None
+
+
+def test_yarn_after_script_if_present_still_classifies_when_not_a_manager_noop() -> None:
+    """Yarn classic does not treat after-script ``--if-present`` as an optional no-op."""
+    assert auto("yarn run build --if-present") == (BUILD, "yarn build")
 
 
 @pytest.mark.parametrize(

@@ -12,7 +12,10 @@ from agentbodycam.core.redact import (
     MAX_ARG_CHARS,
     MAX_ARGV_CHARS,
     MAX_ARGV_ITEMS,
+    PROJECT_PLACEHOLDER,
     REDACTED,
+    ArgvItemOrigin,
+    contains_reserved_marker,
     is_sensitive_name,
     project_relative,
     redact_command,
@@ -177,6 +180,20 @@ def test_absolute_and_relative_project_paths_stay_distinct() -> None:
     assert relative.argv == ("python", "check.py")
     assert absolute.argv != relative.argv
     assert absolute.paths_rewritten and not relative.paths_rewritten
+    assert absolute.item_origins == (ArgvItemOrigin.LITERAL, ArgvItemOrigin.PROJECT_PATH)
+    assert relative.item_origins == (ArgvItemOrigin.LITERAL, ArgvItemOrigin.LITERAL)
+
+
+def test_literal_reserved_project_marker_keeps_literal_origin() -> None:
+    """A user-typed ``<project>/…`` must not look like a rewritten absolute path."""
+    typed = f"{PROJECT_PLACEHOLDER}/check.py"
+    literal = redact_command(["python", typed], project_root=PROJECT, home=HOME)
+    rewritten = redact_command(["python", native("check.py")], project_root=PROJECT, home=HOME)
+    assert literal.argv == rewritten.argv == ("python", typed)
+    assert literal.item_origins[1] is ArgvItemOrigin.LITERAL
+    assert rewritten.item_origins[1] is ArgvItemOrigin.PROJECT_PATH
+    assert not literal.paths_rewritten and rewritten.paths_rewritten
+    assert contains_reserved_marker(typed)
 
 
 def test_external_paths_are_hidden() -> None:

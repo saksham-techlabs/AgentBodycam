@@ -251,8 +251,9 @@ session.stopped
   the environment. **Its output, input and environment are never recorded.**
 - Arguments are recorded with likely secrets redacted (`--token X`, `--api-key=X`,
   `password=X`, `https://user:pass@host`, recognisable API keys and tokens) and absolute
-  paths rewritten (`<project>/…` inside the project, or `<external-path>`). The command
-  itself always receives the original arguments. See
+  paths rewritten (`<project>/…` inside the project, or `<external-path>`), with per-item
+  origins so a generated placeholder cannot be mistaken for the same text typed by the
+  user. The command itself always receives the original arguments. See
   [the redaction rules](docs/architecture.md#wrapped-commands).
 - `run` only works while a recording is active for the project. Otherwise it prints
   `error: no active AgentBodycam recording for this project` and **does not run the
@@ -308,7 +309,9 @@ check.passed       Test passed: pytest
 - **Informational and discovery-only runs stay plain commands too**: `pytest --version`,
   `mypy --help`, `pytest --collect-only`, `cargo test --no-run`, `go test -list X`,
   `dotnet test --list-tests`, `tsc --noEmit --showConfig`, `npm test -- --help`,
-  `npm run build --if-present` (and the equivalent `pnpm` / `yarn` forms), ...
+  `npm run build --if-present` (including `--if-present=true` / `=1` and accepted
+  abbreviations such as `--if-pres`; tokens after `--` are script args, not npm's
+  optional flag), `pnpm run --if-present build`, ...
   They exit 0 without testing, building, linting or type checking anything, so they must
   never count as evidence that the project's checks passed. (`--check` still forces a
   check if you really want one.)
